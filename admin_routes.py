@@ -632,7 +632,15 @@ async def list_email_registration_sessions(
     require_admin(request, x_admin_token)
     if grok_build_adapter is None:
         return {"sessions": [], "error": _GBA_IMPORT_ERROR}
-    return grok_build_adapter.list_registration_sessions()
+    out = grok_build_adapter.list_registration_sessions()
+    try:
+        st = grok_build_adapter.registration_available()
+        if isinstance(out, dict):
+            out["adapter_build"] = st.get("adapter_build")
+            out["available"] = st.get("available")
+    except Exception:
+        pass
+    return out
 
 
 @router.get("/accounts/register-email/sessions/{session_id}")

@@ -47,7 +47,7 @@ from config import (
 import config as _config
 from models import load_models_from_cache, resolve_model
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 
 def _on_startup() -> None:
@@ -108,9 +108,15 @@ def _on_startup() -> None:
 
         st = grok_build_adapter.registration_available()
         if st.get("available"):
-            print("  registration: vendored grok-build-auth ready")
+            print(
+                "  registration: vendored grok-build-auth ready "
+                f"(build={st.get('adapter_build')})"
+            )
         else:
-            print(f"  registration: unavailable ({st.get('error')})")
+            print(
+                f"  registration: unavailable ({st.get('error')}) "
+                f"(build={st.get('adapter_build')})"
+            )
     except Exception as e:  # noqa: BLE001
         print(f"  registration: unavailable ({e})")
 

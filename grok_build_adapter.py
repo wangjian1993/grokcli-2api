@@ -28,6 +28,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 GBA = ROOT / "grok-build-auth"
+ADAPTER_BUILD = "2026-07-10-rsc-sso-1"
 
 YESCAPTCHA_KEY = (
     os.environ.get("GROK2API_YESCAPTCHA_KEY")
@@ -142,6 +143,7 @@ def registration_available() -> dict[str, Any]:
             "available": True,
             "path": str(GBA),
             "vendored": True,
+            "adapter_build": ADAPTER_BUILD,
             "yescaptcha_configured": bool(YESCAPTCHA_KEY),
         }
     except Exception as e:  # noqa: BLE001
@@ -150,6 +152,7 @@ def registration_available() -> dict[str, Any]:
             "available": False,
             "path": str(GBA),
             "vendored": True,
+            "adapter_build": ADAPTER_BUILD,
             "error": str(e),
             "yescaptcha_configured": bool(YESCAPTCHA_KEY),
         }
@@ -298,6 +301,7 @@ def start_registration(
         "error": None,
         "yescaptcha_key": key,
         "proxy": proxy or _proxy_url(),
+        "adapter_build": ADAPTER_BUILD,
     }
     _sessions[sid] = sess
 
@@ -444,11 +448,24 @@ def _run_registration(
         print(f"[grok-build-auth] create_account HTTP={http_status}")
         print(f"[grok-build-auth] create_account set-cookies count={len(sc)}")
         print(f"[grok-build-auth] create_account rsc_body preview: {rsc_preview}")
+        print(f"[grok-build-auth] adapter_build={ADAPTER_BUILD}")
 
-        # Soft-fail path: Next.js often returns HTTP 200 + RSC flight body that
-        # does not embed SSO inline. Always attempt SSO extraction first when
-        # transport succeeded; only hard-fail if both create ok=False AND no SSO.
-        update("fetching_sso", "extracting SSO session")
+        # IMPORTANT: HTTP 200 + Next.js RSC flight is transport success for current
+        # xAI sign-up. SSO is extracted afterwards and is the real gate.
+        is_rsc_ok = bool(
+            http_status == 200
+            and (
+                "$Sreact.fragment" in rsc_body
+                or "react.fragment" in rsc_body.lower()
+                or "/_next/static/chunks/" in rsc_body
+                or bool(getattr(res, "ok", False))
+            )
+        )
+        if is_rsc_ok:
+            update("fetching_sso", f"create_account HTTP 200 (RSC OK); extracting SSO [{ADAPTER_BUILD}]")
+        else:
+            update("fetching_sso", f"create_account ambiguous; still trying SSO [{ADAPTER_BUILD}]")
+
         sso = None
         try:
             sso = client.fetch_sso_token(
@@ -493,37 +510,27 @@ def _run_registration(
             session_cookies["sso"] = sso
             session_cookies["sso-rw"] = sso
 
-        create_ok = bool(getattr(res, "ok", False))
-        # HTTP 200 + typical RSC flight is treated as transport success even when
-        # the heuristic is uncertain; SSO is the real gate.
-        if http_status == 200 and (
-            "$Sreact.fragment" in rsc_body
-            or "$sreact.fragment" in rsc_body.lower()
-            or "/_next/static/chunks/" in rsc_body
-        ):
-            create_ok = True
-
         if sso:
-            if not getattr(res, "ok", False):
-                print(
-                    "[grok-build-auth] create_account heuristic=False but SSO present; continuing"
-                )
-        elif not create_ok:
-            raise RuntimeError(
-                "create_account failed / not confirmed and no SSO cookie. "
-                f"HTTP {http_status}; set_cookies={len(sc)}; "
-                f"cookie_keys={sorted((session_cookies or {}).keys())}; "
-                f"body={rsc_preview!r}"
+            print(
+                f"[grok-build-auth] SSO obtained after create_account "
+                f"(heuristic_ok={bool(getattr(res, 'ok', False))}, rsc_ok={is_rsc_ok})"
             )
         else:
-            # create looked OK but SSO missing — this is the real current failure mode.
+            # Never use the old "create_account failed: HTTP 200; body=..." wording.
+            # That body is usually a normal Next.js success flight.
+            if is_rsc_ok or http_status == 200:
+                raise RuntimeError(
+                    "create_account returned HTTP 200 (RSC OK) but SSO cookie was not obtained. "
+                    f"adapter_build={ADAPTER_BUILD}; set_cookies={len(sc)}; "
+                    f"cookie_keys={sorted((session_cookies or {}).keys())}; "
+                    f"body_preview={rsc_preview!r}. "
+                    "Usually set-cookie hop is blocked (auth.x.ai / auth.grokusercontent.com / grok.com)."
+                )
             raise RuntimeError(
-                "create_account returned HTTP 200 (RSC OK) but SSO cookie was not obtained. "
-                "Account may exist, yet browser session cookie chain failed. "
-                f"HTTP {http_status}, set_cookies={len(sc)}, "
-                f"cookie_keys={sorted((session_cookies or {}).keys())}, "
-                f"body_preview={rsc_preview!r}. "
-                "Check proxy/Cloudflare access to auth.x.ai / auth.grokusercontent.com / grok.com."
+                "create_account failed / not confirmed and no SSO cookie. "
+                f"adapter_build={ADAPTER_BUILD}; HTTP {http_status}; set_cookies={len(sc)}; "
+                f"cookie_keys={sorted((session_cookies or {}).keys())}; "
+                f"body={rsc_preview!r}"
             )
 
         # Primary path: SSO cookie → OIDC device flow → auth.json
