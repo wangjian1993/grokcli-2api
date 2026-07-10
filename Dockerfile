@@ -11,9 +11,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for curl_cffi wheels / TLS
+# System deps: TLS + headless browser stack for grok-register
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        xvfb \
+        chromium \
+        chromium-driver \
+        fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -22,9 +28,10 @@ RUN python -m pip install --no-cache-dir -r /app/requirements.txt
 # Copy full source last for better layer caching of deps
 COPY . /app
 
-# Ensure vendored registration package is present
-RUN test -f /app/grok-build-auth/xconsole_client/__init__.py \
-    && python -c "import grok_build_adapter, app; print('build-check', app.APP_VERSION, grok_build_adapter.ADAPTER_BUILD)"
+# Ensure vendored registration packages are present
+RUN test -f /app/vendors/grok-register/DrissionPage_example.py \
+    && test -f /app/register_runner.py \
+    && python -c "import register_runner, app; print('build-check', app.APP_VERSION, register_runner.ADAPTER_BUILD)"
 
 EXPOSE 3000
 

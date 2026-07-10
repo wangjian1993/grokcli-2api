@@ -22,13 +22,20 @@ from auth import AuthError, load_credentials
 import config as _config
 import sso_to_auth_json as sso_import
 
-# Optional: registration adapter (vendored grok-build-auth + optional deps).
-# Never hard-fail process import if registration deps are missing.
+# Registration adapter: prefer 509992828/grok-register browser runner.
+# Fall back to legacy grok_build_adapter only if register_runner is unavailable.
 try:
-    import grok_build_adapter
-except Exception as _gba_import_err:  # noqa: BLE001
-    grok_build_adapter = None  # type: ignore[assignment]
-    _GBA_IMPORT_ERROR = str(_gba_import_err)
+    import register_runner as grok_build_adapter
+except Exception as _reg_import_err:  # noqa: BLE001
+    try:
+        import grok_build_adapter  # type: ignore
+    except Exception as _gba_import_err:  # noqa: BLE001
+        grok_build_adapter = None  # type: ignore[assignment]
+        _GBA_IMPORT_ERROR = (
+            f"register_runner: {_reg_import_err}; grok_build_adapter: {_gba_import_err}"
+        )
+    else:
+        _GBA_IMPORT_ERROR = None
 else:
     _GBA_IMPORT_ERROR = None
 from config import (
@@ -579,11 +586,11 @@ def _require_grok_build_adapter():
             status_code=503,
             detail=(
                 "注册机模块不可用: "
-                f"{_GBA_IMPORT_ERROR or 'grok_build_adapter import failed'}. "
-                "请执行: pip install -r requirements.txt"
+                f"{_GBA_IMPORT_ERROR or 'register_runner import failed'}. "
+                "请执行: pip install -r requirements.txt "
+                "(需要 DrissionPage / chromium / xvfb；邮箱使用 MoeMail)"
             ),
         )
-    # Validate xconsole_client lazily so main API can still start.
     probe = getattr(grok_build_adapter, "registration_available", None)
     if callable(probe):
         st = probe()
@@ -591,7 +598,7 @@ def _require_grok_build_adapter():
             raise HTTPException(
                 status_code=503,
                 detail=st.get("error")
-                or "grok-build-auth/xconsole_client 不可用，请执行 pip install -r requirements.txt",
+                or "注册组件不可用，请安装 DrissionPage/chromium/xvfb 并配置 MoeMail",
             )
     return grok_build_adapter
 
@@ -602,18 +609,30 @@ async def start_email_registration(
     request: Request,
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
 ):
-    """Start grok-build-auth powered x.ai registration + Build OAuth import."""
+    """Start browser registration (509992828/grok-register) + MoeMail + SSO import."""
     require_admin(request, x_admin_token)
     gba = _require_grok_build_adapter()
     try:
         result = gba.start_registration(
-            yescaptcha_key=body.yescaptcha_key,
             proxy=body.proxy,
             moemail_api_key=body.api_key,
             moemail_base_url=body.base_url,
             prefix=body.prefix,
             domain=body.domain,
+            yescaptcha_key=body.yescaptcha_key,
         )
+    except TypeError:
+        # Compatibility with runners that don't accept yescaptcha_key
+        try:
+            result = gba.start_registration(
+                proxy=body.proxy,
+                moemail_api_key=body.api_key,
+                moemail_base_url=body.base_url,
+                prefix=body.prefix,
+                domain=body.domain,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e)) from e
     if not result.get("ok"):

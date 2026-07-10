@@ -18,3 +18,8 @@ grok-build-auth/oauth_output/
 grok-build-auth/accounts_output/
 grok-build-auth/cliproxyapi_auth/
 grok-build-auth/**/__pycache__/
+vendors/grok-register/sso/
+vendors/grok-register/logs/
+vendors/grok-register/config.json
+vendors/grok-register/**/__pycache__/
+data/register_sso/

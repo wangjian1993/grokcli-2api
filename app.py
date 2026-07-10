@@ -47,7 +47,7 @@ from config import (
 import config as _config
 from models import load_models_from_cache, resolve_model
 
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.7.0"
 
 
 def _on_startup() -> None:
@@ -102,15 +102,19 @@ def _on_startup() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"  (model health failed: {e})")
     # Registration engine is optional — never block API startup.
-    # grok-build-auth is vendored in-tree (not a git submodule).
+    # Prefer 509992828/grok-register browser runner + MoeMail + sso_to_auth_json.
     try:
-        import grok_build_adapter
+        try:
+            import register_runner as _reg
+        except Exception:
+            import grok_build_adapter as _reg  # type: ignore
 
-        st = grok_build_adapter.registration_available()
+        st = _reg.registration_available()
         if st.get("available"):
             print(
-                "  registration: vendored grok-build-auth ready "
-                f"(build={st.get('adapter_build')})"
+                "  registration: ready "
+                f"(engine={st.get('engine') or 'legacy'} "
+                f"build={st.get('adapter_build')})"
             )
         else:
             print(

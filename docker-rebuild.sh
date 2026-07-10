@@ -39,4 +39,4 @@ docker compose logs --tail=60
 echo "== health =="
 curl -sS "http://127.0.0.1:3000/health" || true
 echo
-echo "Done. /health should show version=1.6.3 and registration.adapter_build=2026-07-10-rsc-sso-3"
+echo "Done. /health should show version=1.7.0 and registration.adapter_build=2026-07-10-grok-register-1"
