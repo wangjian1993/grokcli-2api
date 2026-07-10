@@ -504,16 +504,25 @@ class XConsoleAuthClient:
             "sec-fetch-dest": "empty",
             "content-length": str(len(body)),
         })
-        status, _, set_cookies, raw = self._request("POST", self.signup_url, headers=h, body=body)
+        status, resp_headers, set_cookies, raw = self._request(
+            "POST", self.signup_url, headers=h, body=body
+        )
         rsc_body = raw.decode("utf-8", "replace")
         self._last_rsc_body = rsc_body  # store for fetch_sso_token()
         self._last_create_set_cookies = list(set_cookies or [])
-        ok = (status == 200) and self._signup_response_looks_ok(rsc_body, set_cookies or [])
-        if self.debug and status == 200 and not ok:
+        ok = (status == 200) and self._signup_response_looks_ok(
+            rsc_body, set_cookies or [], resp_headers or {}
+        )
+        if self.debug:
             print(
-                "  [create_account] HTTP 200 but body looks like failure; "
-                f"preview={rsc_body[:240]!r}"
+                f"  [create_account] HTTP {status} ok={ok} "
+                f"set_cookies={len(set_cookies or [])} body_len={len(rsc_body)}"
             )
+            if status == 200 and not ok:
+                print(
+                    "  [create_account] HTTP 200 but body looks like failure; "
+                    f"preview={rsc_body[:240]!r}"
+                )
         return SignupResult(
             ok=ok, http_status=status,
             set_cookies=set_cookies,
@@ -521,18 +530,34 @@ class XConsoleAuthClient:
         )
 
     @staticmethod
-    def _signup_response_looks_ok(rsc_body: str, set_cookies: List[str]) -> bool:
-        """HTTP 200 alone is not enough — require positive success evidence.
+    def _signup_response_looks_ok(
+        rsc_body: str,
+        set_cookies: List[str],
+        resp_headers: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """Decide whether a Next.js create_account response looks successful.
 
-        Next.js server actions often return HTTP 200 with an error RSC payload.
-        Defaulting to True caused fake "account created" then password login
-        failures (invalid-credentials).
+        Successful xAI sign-up server actions commonly return HTTP 200 with an
+        RSC flight body that starts like::
+
+            2:"$Sreact.fragment"
+            c:I[443085,["/_next/static/chunks/...
+
+        That is *not* a failure. Real failures usually embed WKE / error codes
+        or a Next.js error flight (`0:E{...}`).
+
+        Policy: on ambiguous HTTP 200 bodies, prefer True and let SSO extraction
+        decide. Only return False for clear hard errors.
         """
         text = (rsc_body or "")
         text_l = text.lower()
         joined_cookies = "\n".join(set_cookies or [])
         joined_cookies_l = joined_cookies.lower()
+        headers_l = " ".join(
+            f"{k}:{v}" for k, v in (resp_headers or {}).items()
+        ).lower()
 
+        # Explicit error markers only (avoid matching JS chunk names like "error")
         hard_fail = (
             "invalid-credentials",
             "email already",
@@ -542,26 +567,46 @@ class XConsoleAuthClient:
             "invalid email",
             "password is too",
             "weak password",
-            "forbidden",
-            "unauthorized",
             "rate limit",
             "too many requests",
             "wke=",
+            "wke:",
             "errorcode",
             "error_code",
             "email_already_in_use",
             "user_already_exists",
+            "account:invalid",
+            "unauthenticated:no-credentials",
+            "access denied",
+            "signup failed",
+            "sign-up failed",
+            "createuserandsession failed",
         )
         if any(x in text_l for x in hard_fail):
             return False
-        # captcha/turnstile failures usually include failed/invalid/required
-        if ("turnstile" in text_l or "captcha" in text_l) and any(
-            k in text_l for k in ("failed", "invalid", "required", "denied", "expired")
+
+        # Next.js server-action hard error flight: 0:E{...} / 1:E{...}
+        if re.search(r'(?m)^\d+:E\{', text):
+            return False
+        if re.search(r'\bdigest\b.{0,40}\berror\b', text_l) and "stack" in text_l:
+            return False
+
+        # Captcha failures usually pair the keyword with failed/invalid/required
+        if re.search(
+            r'(turnstile|captcha).{0,40}(failed|invalid|required|denied|expired)',
+            text_l,
+        ) or re.search(
+            r'(failed|invalid|required|denied|expired).{0,40}(turnstile|captcha)',
+            text_l,
         ):
             return False
 
-        # Positive evidence required
+        # Strong positive evidence
         if "sso=" in joined_cookies_l or "last-logged-in-with=" in joined_cookies_l:
+            return True
+        if "set-cookie" in headers_l and (
+            "sso=" in headers_l or "last-logged-in-with=" in headers_l
+        ):
             return True
         if re.search(
             r'set-cookie\?q=eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+',
@@ -570,30 +615,52 @@ class XConsoleAuthClient:
         ):
             return True
         if re.search(
-            r'(?:^|[;,\s\'"])sso=(eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)',
-            text,
-            flags=re.IGNORECASE | re.MULTILINE,
-        ):
-            return True
-        # bare sso token in body (no cookie attribute prefix)
-        if re.search(
             r'\bsso=eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+',
             text,
             flags=re.IGNORECASE,
         ):
             return True
-        # Success-ish session markers without error
         success_markers = (
             "session_id",
             "signed_in",
             "logged_in",
             "last-logged-in-with",
             "createuserandsessionresponse",
+            "principal_id",
         )
         if any(x in text_l for x in success_markers):
             return True
 
-        # No positive signal → treat as failure (safer for registration pipeline)
+        # Normal successful Next.js App Router action flight. This is what xAI
+        # currently returns on HTTP 200 for create_account (no inline error).
+        # Example: 2:"$Sreact.fragment" / c:I[id,["/_next/static/chunks/...
+        rsc_success_patterns = (
+            r'\$Sreact\.fragment',
+            r'\$sreact\.fragment',
+            r'/_next/static/chunks/',
+            r'(?m)^\d+:I\[',
+            r'(?m)^\d+:"\$Sreact',
+            r'(?m)^\d+:\["\$@',
+            r'(?m)^\d+:null',
+            r'react\.fragment',
+        )
+        if any(re.search(p, text, flags=re.IGNORECASE) for p in rsc_success_patterns):
+            return True
+
+        # Some actions return a tiny null/true payload on success
+        stripped = text.strip()
+        if stripped in {"0:null", "1:null", "0:true", "1:true", "null", "true", ""}:
+            # empty body alone is not enough unless cookies present
+            if stripped == "" and not set_cookies:
+                return False
+            if stripped != "":
+                return True
+
+        # Unknown non-error HTTP 200 body: continue pipeline, let SSO extraction decide.
+        # This avoids false negatives on new RSC shapes.
+        if not any(x in text_l for x in hard_fail):
+            return True
+
         return False
 
     # ----------------------------------------------------------------- SSO extraction

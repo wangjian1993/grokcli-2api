@@ -440,20 +440,23 @@ def _run_registration(
         sc = list(getattr(res, "set_cookies", None) or [])
         rsc_body = getattr(res, "rsc_body", "") or ""
         rsc_preview = rsc_body[:800]
-        print(f"[grok-build-auth] create_account HTTP={getattr(res, 'http_status', '?')}")
+        http_status = getattr(res, "http_status", None)
+        print(f"[grok-build-auth] create_account HTTP={http_status}")
         print(f"[grok-build-auth] create_account set-cookies count={len(sc)}")
         print(f"[grok-build-auth] create_account rsc_body preview: {rsc_preview}")
-        if not getattr(res, "ok", False):
-            raise RuntimeError(
-                "create_account failed / not confirmed. "
-                f"HTTP {getattr(res, 'http_status', '?')}; "
-                f"set_cookies={len(sc)}; body={rsc_preview!r}"
-            )
 
+        # Soft-fail path: Next.js often returns HTTP 200 + RSC flight body that
+        # does not embed SSO inline. Always attempt SSO extraction first when
+        # transport succeeded; only hard-fail if both create ok=False AND no SSO.
         update("fetching_sso", "extracting SSO session")
-        sso = client.fetch_sso_token(
-            email=email, password=password, save=True, retries=6
-        )
+        sso = None
+        try:
+            sso = client.fetch_sso_token(
+                email=email, password=password, save=True, retries=6
+            )
+        except Exception as sso_fetch_err:  # noqa: BLE001
+            print(f"[grok-build-auth] fetch_sso_token error: {sso_fetch_err}")
+
         if not sso:
             try:
                 from xconsole_client.sso import (
@@ -490,15 +493,37 @@ def _run_registration(
             session_cookies["sso"] = sso
             session_cookies["sso-rw"] = sso
 
-        if not sso:
+        create_ok = bool(getattr(res, "ok", False))
+        # HTTP 200 + typical RSC flight is treated as transport success even when
+        # the heuristic is uncertain; SSO is the real gate.
+        if http_status == 200 and (
+            "$Sreact.fragment" in rsc_body
+            or "$sreact.fragment" in rsc_body.lower()
+            or "/_next/static/chunks/" in rsc_body
+        ):
+            create_ok = True
+
+        if sso:
+            if not getattr(res, "ok", False):
+                print(
+                    "[grok-build-auth] create_account heuristic=False but SSO present; continuing"
+                )
+        elif not create_ok:
             raise RuntimeError(
-                "account step finished but SSO cookie was not obtained. "
-                "Cannot continue to OAuth/CreateSession without browser session. "
-                f"HTTP {getattr(res, 'http_status', '?')}, set_cookies={len(sc)}, "
+                "create_account failed / not confirmed and no SSO cookie. "
+                f"HTTP {http_status}; set_cookies={len(sc)}; "
+                f"cookie_keys={sorted((session_cookies or {}).keys())}; "
+                f"body={rsc_preview!r}"
+            )
+        else:
+            # create looked OK but SSO missing — this is the real current failure mode.
+            raise RuntimeError(
+                "create_account returned HTTP 200 (RSC OK) but SSO cookie was not obtained. "
+                "Account may exist, yet browser session cookie chain failed. "
+                f"HTTP {http_status}, set_cookies={len(sc)}, "
                 f"cookie_keys={sorted((session_cookies or {}).keys())}, "
                 f"body_preview={rsc_preview!r}. "
-                "Usually means create_account did not fully succeed, or the "
-                "set-cookie hop is blocked by network/proxy/Cloudflare."
+                "Check proxy/Cloudflare access to auth.x.ai / auth.grokusercontent.com / grok.com."
             )
 
         # Primary path: SSO cookie → OIDC device flow → auth.json
