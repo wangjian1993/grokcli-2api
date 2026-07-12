@@ -161,3 +161,4 @@ window.G2A = window.G2A || {};
   G2A.download = download;
   G2A.onUnauthorized = onUnauthorized;
 })(window.G2A);
+/* g2a-cache-bust-20260712-local-solver */

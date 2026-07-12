@@ -260,3 +260,4 @@ async function logout() {
 
   G2A.auth = { requireSession, initLoginPage, logout, redirectLogin, safeNext };
 })(window.G2A);
+/* g2a-cache-bust-20260712-local-solver */

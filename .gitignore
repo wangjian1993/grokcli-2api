@@ -47,3 +47,9 @@ auth.bak.*
 *.key
 id_rsa
 id_rsa.pub
+
+# local turnstile solver runtime
+turnstile-solver/.venv/
+turnstile-solver/logs/
+turnstile-solver/keys/
+turnstile-solver/__pycache__/

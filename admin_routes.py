@@ -190,6 +190,16 @@ class EmailRegistrationBody(BaseModel):
     # MoeMail official presets only: 1h / 24h / 3d / permanent(0)
     expiry_ms: int | None = Field(default=None, ge=0, le=259200000)
     api_key: str | None = Field(default=None, max_length=512)
+    captcha_provider: str | None = Field(
+        default=None,
+        pattern="^(local|yescaptcha)$",
+        description="Turnstile provider: local solver or YesCaptcha",
+    )
+    local_solver_url: str | None = Field(
+        default=None,
+        max_length=256,
+        description="Local Turnstile Solver base URL, e.g. http://127.0.0.1:5072",
+    )
     yescaptcha_key: str | None = Field(default=None, max_length=512)
     base_url: str | None = Field(default=None, max_length=256)
     proxy: str | None = Field(default=None, max_length=512)
@@ -202,7 +212,7 @@ class EmailRegistrationBody(BaseModel):
         description="How many accounts to register (batch/multi-thread; no hard cap, concurrency limits parallelism)",
     )
     concurrency: int | None = Field(
-        default=3,
+        default=5,
         ge=1,
         le=10,
         description="Max concurrent registration workers",
@@ -222,13 +232,23 @@ class EmailRegistrationProxyTestBody(BaseModel):
 
 
 class RegistrationConfigBody(BaseModel):
-    """Persist protocol-registration form (MoeMail / YesCaptcha / proxy)."""
+    """Persist protocol-registration form (MoeMail / captcha / proxy)."""
 
     base_url: str | None = Field(default=None, max_length=256)
     api_key: str | None = Field(default=None, max_length=512)
     domain: str | None = Field(default=None, max_length=128)
     prefix: str | None = Field(default=None, max_length=64)
     expiry_ms: int | None = Field(default=None, ge=0, le=259200000)
+    captcha_provider: str | None = Field(
+        default=None,
+        pattern="^(local|yescaptcha)$",
+        description="Turnstile provider: local solver or YesCaptcha",
+    )
+    local_solver_url: str | None = Field(
+        default=None,
+        max_length=256,
+        description="Local Turnstile Solver base URL",
+    )
     yescaptcha_key: str | None = Field(default=None, max_length=512)
     proxy: str | None = Field(default=None, max_length=512)
     proxy_username: str | None = Field(default=None, max_length=256)
@@ -1224,6 +1244,8 @@ def _registration_cfg_from_body(body: EmailRegistrationBody | RegistrationConfig
         "domain": getattr(body, "domain", None),
         "prefix": getattr(body, "prefix", None),
         "expiry_ms": getattr(body, "expiry_ms", None),
+        "captcha_provider": getattr(body, "captcha_provider", None),
+        "local_solver_url": getattr(body, "local_solver_url", None),
         "yescaptcha_key": getattr(body, "yescaptcha_key", None),
         "proxy": body.proxy,
         "proxy_username": getattr(body, "proxy_username", None),
@@ -1317,6 +1339,8 @@ async def start_email_registration(
             prefix=resolved.get("prefix") or None,
             domain=resolved.get("domain") or None,
             expiry_ms=resolved.get("expiry_ms"),
+            captcha_provider=resolved.get("captcha_provider") or None,
+            local_solver_url=resolved.get("local_solver_url") or None,
             yescaptcha_key=resolved.get("yescaptcha_key") or None,
             count=resolved.get("count"),
             concurrency=resolved.get("concurrency"),
@@ -1331,6 +1355,8 @@ async def start_email_registration(
                 moemail_base_url=resolved.get("base_url") or None,
                 prefix=resolved.get("prefix") or None,
                 domain=resolved.get("domain") or None,
+                captcha_provider=resolved.get("captcha_provider") or None,
+                local_solver_url=resolved.get("local_solver_url") or None,
                 yescaptcha_key=resolved.get("yescaptcha_key") or None,
             )
         except Exception as e:  # noqa: BLE001
@@ -1391,6 +1417,9 @@ async def list_email_registration_sessions(
             out["available"] = st.get("available")
             out["engine"] = st.get("engine") or "dongguatanglinux/grok-build-auth"
             out["yescaptcha_configured"] = st.get("yescaptcha_configured")
+            out["captcha_provider"] = st.get("captcha_provider")
+            out["local_solver_configured"] = st.get("local_solver_configured")
+            out["local_solver_url"] = st.get("local_solver_url")
     except Exception:
         pass
     return out

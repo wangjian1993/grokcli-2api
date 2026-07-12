@@ -15,3 +15,4 @@ window.G2A = window.G2A || {};
   G2A.refreshStatus = refreshStatus;
   G2A.refreshDashboard = refreshDashboard;
 })(window.G2A);
+/* g2a-cache-bust-20260712-local-solver */

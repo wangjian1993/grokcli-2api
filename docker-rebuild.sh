@@ -59,6 +59,7 @@ fi
 echo "== ensure deps up =="
 docker compose up -d redis postgres
 
+
 echo "== recreate app only =="
 # --no-deps keeps redis/postgres untouched; -d detaches; --force-recreate swaps container
 docker compose up -d --no-deps --force-recreate "$APP_SERVICE"

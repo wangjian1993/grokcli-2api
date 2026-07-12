@@ -2117,19 +2117,42 @@ const REG_CONFIG_KEY = "g2a_registration_config_v1";
 let regConfigCache = null;
 let regConfigLoadedAt = 0;
 
+function syncRegCaptchaProviderUI() {
+  const provider = $("reg-captcha-provider")
+    ? ($("reg-captcha-provider").value || "local").trim().toLowerCase()
+    : "local";
+  const isLocal = provider !== "yescaptcha";
+  // Local captcha is always inline in main container; never expose URL field.
+  if ($("reg-local-solver-wrap")) {
+    $("reg-local-solver-wrap").style.display = "none";
+  }
+  if ($("reg-yescaptcha-wrap")) {
+    $("reg-yescaptcha-wrap").style.display = isLocal ? "none" : "";
+  }
+}
+
 function readRegConfig() {
+  const provider = $("reg-captcha-provider")
+    ? ($("reg-captcha-provider").value || "local").trim().toLowerCase()
+    : "local";
+  const isLocal = provider !== "yescaptcha";
   return {
     base_url: $("reg-base-url") ? $("reg-base-url").value.trim() : "",
     prefix: $("reg-prefix") ? $("reg-prefix").value.trim() : "",
     domain: $("reg-domain") ? $("reg-domain").value.trim() : "",
     expiry_ms: $("reg-expiry-ms") ? $("reg-expiry-ms").value.trim() : "",
     api_key: $("reg-api-key") ? $("reg-api-key").value.trim() : "",
-    yescaptcha_key: $("reg-yescaptcha-key") ? $("reg-yescaptcha-key").value.trim() : "",
+    captcha_provider: isLocal ? "local" : "yescaptcha",
+    // Inline local solver is fixed; do not accept/show custom URL.
+    local_solver_url: isLocal ? "http://127.0.0.1:5072" : "",
+    yescaptcha_key: isLocal
+      ? ""
+      : ($("reg-yescaptcha-key") ? $("reg-yescaptcha-key").value.trim() : ""),
     proxy: $("reg-proxy") ? $("reg-proxy").value.trim() : "",
     proxy_username: $("reg-proxy-username") ? $("reg-proxy-username").value.trim() : "",
     proxy_password: $("reg-proxy-password") ? $("reg-proxy-password").value.trim() : "",
     count: $("reg-count") ? $("reg-count").value.trim() : "1",
-    concurrency: $("reg-concurrency") ? $("reg-concurrency").value.trim() : "3",
+    concurrency: $("reg-concurrency") ? $("reg-concurrency").value.trim() : "5",
     stagger_ms: $("reg-stagger-ms") ? $("reg-stagger-ms").value.trim() : "300",
   };
 }
@@ -2170,13 +2193,19 @@ function applyRegConfig(cfg) {
     if ($("reg-expiry-ms").value !== exp) $("reg-expiry-ms").value = "3600000";
   }
   if ($("reg-api-key")) $("reg-api-key").value = cfg.api_key || "";
+  if ($("reg-captcha-provider")) {
+    const provider = String(cfg.captcha_provider || "local").trim().toLowerCase();
+    $("reg-captcha-provider").value = provider === "yescaptcha" ? "yescaptcha" : "local";
+  }
+  // Local solver URL is not user-facing (always inline 127.0.0.1:5072).
   if ($("reg-yescaptcha-key")) $("reg-yescaptcha-key").value = cfg.yescaptcha_key || "";
   if ($("reg-proxy")) $("reg-proxy").value = cfg.proxy || "";
   if ($("reg-proxy-username")) $("reg-proxy-username").value = cfg.proxy_username || "";
   if ($("reg-proxy-password")) $("reg-proxy-password").value = cfg.proxy_password || "";
   if ($("reg-count")) $("reg-count").value = cfg.count != null ? String(cfg.count) : "1";
-  if ($("reg-concurrency")) $("reg-concurrency").value = cfg.concurrency != null ? String(cfg.concurrency) : "3";
+  if ($("reg-concurrency")) $("reg-concurrency").value = cfg.concurrency != null ? String(cfg.concurrency) : "5";
   if ($("reg-stagger-ms")) $("reg-stagger-ms").value = cfg.stagger_ms != null ? String(cfg.stagger_ms) : "300";
+  syncRegCaptchaProviderUI();
   regConfigCache = Object.assign({}, cfg);
 }
 
@@ -2252,12 +2281,19 @@ function buildRegBody(config) {
   // Always send an official MoeMail preset (including permanent=0).
   body.expiry_ms = Number.parseInt(normalizeRegExpiryMs(config.expiry_ms), 10);
   if (config.api_key) body.api_key = config.api_key;
-  if (config.yescaptcha_key) body.yescaptcha_key = config.yescaptcha_key;
+  const provider = String(config.captcha_provider || "local").trim().toLowerCase();
+  body.captcha_provider = provider === "yescaptcha" ? "yescaptcha" : "local";
+  // Local mode: always inline; never send custom URL.
+  if (body.captcha_provider === "local") {
+    body.local_solver_url = "http://127.0.0.1:5072";
+  } else if (config.yescaptcha_key) {
+    body.yescaptcha_key = config.yescaptcha_key;
+  }
   if (config.proxy) body.proxy = config.proxy;
   if (config.proxy_username) body.proxy_username = config.proxy_username;
   if (config.proxy_password) body.proxy_password = config.proxy_password;
   const count = Number.parseInt(config.count || "1", 10);
-  const concurrency = Number.parseInt(config.concurrency || "3", 10);
+  const concurrency = Number.parseInt(config.concurrency || "5", 10);
   const stagger = Number.parseInt(config.stagger_ms || "300", 10);
   if (Number.isFinite(count) && count > 0) body.count = Math.floor(count);
   // threads / concurrency: real in-flight registration cap (3 => 3 at a time)
@@ -2675,7 +2711,11 @@ if (document.readyState !== "loading") {
 
 
 /* ── Events ─────────────────────────────────────────── */
-loadRegConfig();
+loadRegConfig().then(() => {
+  try { syncRegCaptchaProviderUI(); } catch (_) {}
+}).catch(() => {
+  try { syncRegCaptchaProviderUI(); } catch (_) {}
+});
 
 document.querySelectorAll(".sidebar .nav-btn").forEach(btn => {
   btn.onclick = () => switchTab(btn.dataset.tab);
@@ -3550,6 +3590,12 @@ if ($("btn-save-reg")) {
 if ($("btn-refresh-reg")) {
   on("btn-refresh-reg", "onclick", () => pollRegSession());
 }
+if ($("reg-captcha-provider")) {
+  on("reg-captcha-provider", "onchange", () => {
+    syncRegCaptchaProviderUI();
+  });
+  syncRegCaptchaProviderUI();
+}
 
 
 
@@ -3964,3 +4010,4 @@ window.G2AAdmin = { bootstrap, loadDashboard, api, $, toast, PAGE_META, renderAc
     else bootstrap();
   }
 })();
+/* g2a-cache-bust-20260712-local-solver */

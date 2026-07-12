@@ -28,7 +28,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 GBA = ROOT / "grok-build-auth"
-ADAPTER_BUILD = "2026-07-12-protocol-8"
+ADAPTER_BUILD = "2026-07-13-inline-captcha-1"
 # Newly registered accounts often need a short settle window before probe.
 REGISTER_PROBE_DELAY_SEC = float(
     os.environ.get("GROK2API_REG_PROBE_DELAY_SEC", "30") or 30
@@ -39,6 +39,22 @@ YESCAPTCHA_KEY = (
     or os.environ.get("YESCAPTCHA_API_KEY")
     or ""
 ).strip()
+
+CAPTCHA_PROVIDER = (
+    os.environ.get("GROK2API_CAPTCHA_PROVIDER")
+    or os.environ.get("CAPTCHA_PROVIDER")
+    or "local"
+).strip().lower()
+if CAPTCHA_PROVIDER not in {"local", "yescaptcha"}:
+    CAPTCHA_PROVIDER = "local"
+
+LOCAL_SOLVER_URL = (
+    os.environ.get("GROK2API_LOCAL_SOLVER_URL")
+    or os.environ.get("LOCAL_SOLVER_URL")
+    or os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
+    or os.environ.get("YESCAPTCHA_ENDPOINT")
+    or "http://127.0.0.1:5072"
+).strip().rstrip("/")
 
 # Hard cap for multi-thread registration concurrency only (YesCaptcha + xAI rate limits).
 # Batch count is intentionally uncapped — only concurrency bounds parallelism.
@@ -256,6 +272,21 @@ def registration_available() -> dict[str, Any]:
         moemail_configured = moemail_configured or bool(_cfg_moemail)
     except Exception:
         pass
+    provider = (
+        CAPTCHA_PROVIDER
+        or os.environ.get("GROK2API_CAPTCHA_PROVIDER")
+        or os.environ.get("CAPTCHA_PROVIDER")
+        or "local"
+    ).strip().lower()
+    if provider not in {"local", "yescaptcha"}:
+        provider = "local"
+    local_url = (
+        LOCAL_SOLVER_URL
+        or os.environ.get("GROK2API_LOCAL_SOLVER_URL")
+        or os.environ.get("LOCAL_SOLVER_URL")
+        or ""
+    ).strip().rstrip("/")
+    captcha_ready = bool(local_url) if provider == "local" else bool(YESCAPTCHA_KEY)
     try:
         ensure_xconsole()
         return {
@@ -265,7 +296,10 @@ def registration_available() -> dict[str, Any]:
             "path": str(GBA),
             "vendored": True,
             "adapter_build": ADAPTER_BUILD,
-            "yescaptcha_configured": bool(YESCAPTCHA_KEY),
+            "captcha_provider": provider,
+            "local_solver_url": local_url,
+            "local_solver_configured": bool(local_url),
+            "yescaptcha_configured": captcha_ready if provider == "local" else bool(YESCAPTCHA_KEY),
             "moemail_configured": moemail_configured,
         }
     except Exception as e:  # noqa: BLE001
@@ -277,7 +311,10 @@ def registration_available() -> dict[str, Any]:
             "vendored": True,
             "adapter_build": ADAPTER_BUILD,
             "error": str(e),
-            "yescaptcha_configured": bool(YESCAPTCHA_KEY),
+            "captcha_provider": provider,
+            "local_solver_url": local_url,
+            "local_solver_configured": bool(local_url),
+            "yescaptcha_configured": captcha_ready if provider == "local" else bool(YESCAPTCHA_KEY),
             "moemail_configured": moemail_configured,
         }
 
@@ -506,6 +543,8 @@ def _start_one_registration(
 
 def start_registration(
     *,
+    captcha_provider: str | None = None,
+    local_solver_url: str | None = None,
     yescaptcha_key: str | None = None,
     proxy: str | None = None,
     moemail_api_key: str | None = None,
@@ -530,25 +569,67 @@ def start_registration(
 
     _clean_old_sessions()
 
-    # Prefer request override, then module attr, then live env (DB-applied at runtime).
-    key = (
-        yescaptcha_key
-        or YESCAPTCHA_KEY
-        or os.environ.get("GROK2API_YESCAPTCHA_KEY")
-        or os.environ.get("YESCAPTCHA_API_KEY")
-        or ""
-    ).strip()
+    provider = (
+        captcha_provider
+        or CAPTCHA_PROVIDER
+        or os.environ.get("GROK2API_CAPTCHA_PROVIDER")
+        or os.environ.get("CAPTCHA_PROVIDER")
+        or "local"
+    ).strip().lower()
+    if provider not in {"local", "yescaptcha"}:
+        provider = "local"
+    try:
+        globals()["CAPTCHA_PROVIDER"] = provider
+    except Exception:
+        pass
+
+    if provider == "local":
+        # Always inline in main container; ignore any external/custom URL.
+        solver_url = "http://127.0.0.1:5072"
+        try:
+            globals()["LOCAL_SOLVER_URL"] = solver_url
+        except Exception:
+            pass
+        os.environ["GROK2API_LOCAL_SOLVER_URL"] = solver_url
+        os.environ["LOCAL_SOLVER_URL"] = solver_url
+        os.environ["GROK2API_YESCAPTCHA_ENDPOINT"] = solver_url
+        os.environ["YESCAPTCHA_ENDPOINT"] = solver_url
+        key = "local"
+    else:
+        # Cloud YesCaptcha must not inherit local solver endpoint/key.
+        try:
+            globals()["LOCAL_SOLVER_URL"] = ""
+        except Exception:
+            pass
+        for k in (
+            "GROK2API_LOCAL_SOLVER_URL",
+            "LOCAL_SOLVER_URL",
+            "GROK2API_YESCAPTCHA_ENDPOINT",
+            "YESCAPTCHA_ENDPOINT",
+            "YESCAPTCHA_API_BASE",
+        ):
+            os.environ.pop(k, None)
+        key = (
+            yescaptcha_key
+            or YESCAPTCHA_KEY
+            or os.environ.get("GROK2API_YESCAPTCHA_KEY")
+            or os.environ.get("YESCAPTCHA_API_KEY")
+            or ""
+        ).strip()
+        if key == "local":
+            key = ""
+        if not key:
+            return {
+                "ok": False,
+                "error": "YESCAPTCHA_KEY is required (set GROK2API_YESCAPTCHA_KEY, save in 协议注册配置, or pass yescaptcha_key)",
+            }
+
     if key and key != YESCAPTCHA_KEY:
         # keep module attr in sync for subsequent workers
         try:
             globals()["YESCAPTCHA_KEY"] = key
         except Exception:
             pass
-    if not key:
-        return {
-            "ok": False,
-            "error": "YESCAPTCHA_KEY is required (set GROK2API_YESCAPTCHA_KEY, save in 协议注册配置, or pass yescaptcha_key)",
-        }
 
     try:
         n = int(count if count is not None else 1)
@@ -813,25 +894,60 @@ def _run_registration(
                 "config TURNSTILE_SITEKEY is empty."
             )
 
-        endpoint = (
-            os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
-            or os.environ.get("YESCAPTCHA_ENDPOINT")
-            or ""
-        ).strip() or None
+        provider = (
+            CAPTCHA_PROVIDER
+            or os.environ.get("GROK2API_CAPTCHA_PROVIDER")
+            or os.environ.get("CAPTCHA_PROVIDER")
+            or "local"
+        ).strip().lower()
+        if provider not in {"local", "yescaptcha"}:
+            provider = "local"
+
+        if provider == "local":
+            # Always use in-container inline solver; ignore external/custom URL.
+            endpoint = "http://127.0.0.1:5072"
+            solver_key = "local"
+            auto_fallback = False
+        else:
+            # Cloud YesCaptcha only; never inherit local solver endpoint.
+            endpoint = (
+                os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
+                or os.environ.get("YESCAPTCHA_ENDPOINT")
+                or os.environ.get("YESCAPTCHA_API_BASE")
+                or ""
+            ).strip() or None
+            # Guard against accidental local leftover endpoint.
+            if endpoint and (
+                "127.0.0.1" in endpoint
+                or "localhost" in endpoint
+                or endpoint.rstrip("/").endswith(":5072")
+            ):
+                endpoint = None
+            solver_key = (
+                yescaptcha_key
+                or YESCAPTCHA_KEY
+                or os.environ.get("GROK2API_YESCAPTCHA_KEY")
+                or os.environ.get("YESCAPTCHA_API_KEY")
+                or ""
+            ).strip()
+            if not solver_key or solver_key == "local":
+                raise RuntimeError("YesCaptcha 模式需要有效的 YESCAPTCHA_KEY")
+            auto_fallback = True
 
         def _turnstile_progress(msg: str) -> None:
             update("solving_turnstile", f"Turnstile: {msg}")
 
         solver = YesCaptchaSolver(
-            yescaptcha_key,
+            solver_key,
             endpoint=endpoint,
             timeout=float(os.environ.get("GROK2API_YESCAPTCHA_TIMEOUT", "180") or 180),
             debug=True,
             on_progress=_turnstile_progress,
-            auto_fallback_endpoint=True,
+            # Local: no cloud fallback. YesCaptcha: allow cn/global peer fallback.
+            auto_fallback_endpoint=auto_fallback,
         )
         print(
-            f"[grok-build-auth] turnstile website_url={website_url} "
+            f"[grok-build-auth] turnstile provider={provider} website_url={website_url} "
             f"sitekey={sitekey} endpoint={getattr(solver, '_endpoint', '?')}"
         )
 
@@ -843,7 +959,8 @@ def _run_registration(
         # Old order verified the code then waited for captcha; create_account then
         # failed with WKE=email:invalid-validation-code because the code expired /
         # was single-use after the slow captcha step.
-        update("solving_turnstile", "solving Turnstile via YesCaptcha (before email code)")
+        solver_label = "本地过盾" if provider == "local" else "YesCaptcha"
+        update("solving_turnstile", f"solving Turnstile via {solver_label} (before email code)")
         try:
             turnstile = solver.solve_turnstile(
                 website_url=website_url,

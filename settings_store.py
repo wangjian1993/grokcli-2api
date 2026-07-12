@@ -1200,6 +1200,8 @@ _REG_CONFIG_KEYS = (
     "domain",
     "prefix",
     "expiry_ms",
+    "captcha_provider",
+    "local_solver_url",
     "yescaptcha_key",
     "proxy",
     "proxy_username",
@@ -1260,6 +1262,22 @@ def _env_registration_defaults() -> dict[str, Any]:
     ).strip()
     if yes:
         out["yescaptcha_key"] = yes
+    captcha_provider = (
+        os.environ.get("GROK2API_CAPTCHA_PROVIDER")
+        or os.environ.get("CAPTCHA_PROVIDER")
+        or ""
+    ).strip().lower()
+    if captcha_provider in {"local", "yescaptcha"}:
+        out["captcha_provider"] = captcha_provider
+    local_solver_url = (
+        os.environ.get("GROK2API_LOCAL_SOLVER_URL")
+        or os.environ.get("LOCAL_SOLVER_URL")
+        or os.environ.get("GROK2API_YESCAPTCHA_ENDPOINT")
+        or os.environ.get("YESCAPTCHA_ENDPOINT")
+        or ""
+    ).strip()
+    if local_solver_url:
+        out["local_solver_url"] = local_solver_url.rstrip("/")
     return out
 
 
@@ -1284,6 +1302,22 @@ def _normalize_registration_config(
     cfg["api_key"] = _pick_str("api_key", 512)
     cfg["domain"] = _pick_str("domain", 128).lstrip("@").strip(".")
     cfg["prefix"] = _pick_str("prefix", 64)
+    provider_raw = _pick_str("captcha_provider", 32).lower()
+    if provider_raw not in {"local", "yescaptcha"}:
+        # Prefer local when a local solver URL is configured; otherwise YesCaptcha.
+        has_local = bool(
+            str(src.get("local_solver_url") or env.get("local_solver_url") or "").strip()
+        )
+        has_yes = bool(
+            str(src.get("yescaptcha_key") or env.get("yescaptcha_key") or "").strip()
+        )
+        provider_raw = "local" if has_local or not has_yes else "yescaptcha"
+    cfg["captcha_provider"] = provider_raw
+    # Local is always inline; YesCaptcha must not carry local URL.
+    if provider_raw == "local":
+        cfg["local_solver_url"] = "http://127.0.0.1:5072"
+    else:
+        cfg["local_solver_url"] = ""
     cfg["yescaptcha_key"] = _pick_str("yescaptcha_key", 512)
     cfg["proxy"] = _pick_str("proxy", 512)
     cfg["proxy_username"] = _pick_str("proxy_username", 256)
@@ -1311,7 +1345,7 @@ def _normalize_registration_config(
         return max(lo, min(hi, v))
 
     cfg["count"] = _int_field("count", 1, 1, 10_000)
-    cfg["concurrency"] = _int_field("concurrency", 3, 1, 10)
+    cfg["concurrency"] = _int_field("concurrency", 5, 1, 10)
     cfg["stagger_ms"] = _int_field("stagger_ms", 400, 0, 10_000)
     return cfg
 
@@ -1332,11 +1366,19 @@ def get_registration_config(*, include_secrets: bool = True) -> dict[str, Any]:
         else:
             public[k] = ""
             public[f"{k}_set"] = False
+    provider = str(cfg.get("captcha_provider") or "local").strip().lower()
     public["configured"] = {
         "moemail": bool(cfg.get("api_key")),
         "yescaptcha": bool(cfg.get("yescaptcha_key")),
+        "local_solver": bool(cfg.get("local_solver_url")),
+        "captcha": (
+            bool(cfg.get("local_solver_url"))
+            if provider == "local"
+            else bool(cfg.get("yescaptcha_key"))
+        ),
         "proxy": bool(cfg.get("proxy")),
     }
+    public["captcha_provider"] = provider
     return public
 
 
@@ -1411,6 +1453,11 @@ def apply_registration_config_to_runtime(cfg: dict[str, Any] | None = None) -> N
     api_key = str(cfg.get("api_key") or "").strip()
     base_url = str(cfg.get("base_url") or "").strip()
     domain = str(cfg.get("domain") or "").strip()
+    provider = str(cfg.get("captcha_provider") or "local").strip().lower()
+    if provider not in {"local", "yescaptcha"}:
+        provider = "local"
+    # Local captcha is always the in-container inline solver.
+    local_solver_url = "http://127.0.0.1:5072" if provider == "local" else ""
     yes = str(cfg.get("yescaptcha_key") or "").strip()
     proxy = str(cfg.get("proxy") or "").strip()
     proxy_user = str(cfg.get("proxy_username") or "").strip()
@@ -1423,9 +1470,35 @@ def apply_registration_config_to_runtime(cfg: dict[str, Any] | None = None) -> N
         _set_env("GROK2API_MOEMAIL_BASE_URL", base_url)
     if domain:
         _set_env("GROK2API_MOEMAIL_DOMAIN", domain)
-    if yes:
-        _set_env("GROK2API_YESCAPTCHA_KEY", yes)
-        _set_env("YESCAPTCHA_API_KEY", yes)
+    _set_env("GROK2API_CAPTCHA_PROVIDER", provider)
+    _set_env("CAPTCHA_PROVIDER", provider)
+    if provider == "local":
+        # Local solver speaks createTask protocol; reuse YesCaptcha client with custom endpoint.
+        _set_env("GROK2API_LOCAL_SOLVER_URL", local_solver_url)
+        _set_env("LOCAL_SOLVER_URL", local_solver_url)
+        _set_env("GROK2API_YESCAPTCHA_ENDPOINT", local_solver_url)
+        _set_env("YESCAPTCHA_ENDPOINT", local_solver_url)
+        # Local solver does not require a real key; keep a stable placeholder.
+        local_key = "local"
+        _set_env("GROK2API_YESCAPTCHA_KEY", local_key)
+        _set_env("YESCAPTCHA_API_KEY", local_key)
+        yes = local_key
+    else:
+        # YesCaptcha cloud mode must not inherit local solver endpoint/key.
+        for k in (
+            "GROK2API_LOCAL_SOLVER_URL",
+            "LOCAL_SOLVER_URL",
+            "GROK2API_YESCAPTCHA_ENDPOINT",
+            "YESCAPTCHA_ENDPOINT",
+            "YESCAPTCHA_API_BASE",
+        ):
+            os.environ.pop(k, None)
+        if yes:
+            _set_env("GROK2API_YESCAPTCHA_KEY", yes)
+            _set_env("YESCAPTCHA_API_KEY", yes)
+        else:
+            os.environ.pop("GROK2API_YESCAPTCHA_KEY", None)
+            os.environ.pop("YESCAPTCHA_API_KEY", None)
     if proxy:
         _set_env("GROK2API_XAI_PROXY", proxy)
     if proxy_user:
@@ -1465,8 +1538,16 @@ def apply_registration_config_to_runtime(cfg: dict[str, Any] | None = None) -> N
     try:
         import grok_build_adapter as gba
 
-        if yes:
-            gba.YESCAPTCHA_KEY = yes
+        if hasattr(gba, "CAPTCHA_PROVIDER"):
+            gba.CAPTCHA_PROVIDER = provider
+        if provider == "local":
+            gba.YESCAPTCHA_KEY = "local"
+            if hasattr(gba, "LOCAL_SOLVER_URL"):
+                gba.LOCAL_SOLVER_URL = "http://127.0.0.1:5072"
+        else:
+            gba.YESCAPTCHA_KEY = yes or ""
+            if hasattr(gba, "LOCAL_SOLVER_URL"):
+                gba.LOCAL_SOLVER_URL = ""
     except Exception:
         pass
 

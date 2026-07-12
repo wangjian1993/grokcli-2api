@@ -243,3 +243,4 @@ if (typeof window.G2A.$ !== "function") {
     try { return document.getElementById(String(id)); } catch (_) { return null; }
   };
 }
+/* g2a-cache-bust-20260712-local-solver */

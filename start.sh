@@ -60,6 +60,14 @@ export DATABASE_URL="${DATABASE_URL:-${GROK2API_DATABASE_URL:-postgresql://grok2
 export GROK2API_REDIS_URL="${GROK2API_REDIS_URL:-$REDIS_URL}"
 export GROK2API_DATABASE_URL="${GROK2API_DATABASE_URL:-$DATABASE_URL}"
 
+# Inline captcha (only meaningful when running with entrypoint / docker image)
+export GROK2API_CAPTCHA_PROVIDER="${GROK2API_CAPTCHA_PROVIDER:-local}"
+export GROK2API_INLINE_SOLVER="${GROK2API_INLINE_SOLVER:-1}"
+export GROK2API_REG_CONCURRENCY="${GROK2API_REG_CONCURRENCY:-3}"
+export TURNSTILE_THREAD="${TURNSTILE_THREAD:-${GROK2API_REG_CONCURRENCY:-3}}"
+export TURNSTILE_BROWSER_TYPE="${TURNSTILE_BROWSER_TYPE:-camoufox}"
+export TURNSTILE_PORT="${TURNSTILE_PORT:-5072}"
+
 PORT="$GROK2API_PORT"
 echo "Starting grokcli-2api (high-concurrency)..."
 echo "  Admin:     http://127.0.0.1:${PORT}/admin"
@@ -70,6 +78,7 @@ echo "  Workers:   \${GROK2API_WORKERS:-auto(cpu)}"
 echo "  Redis:     ${REDIS_URL}"
 echo "  Postgres:  ${DATABASE_URL%%@*}@…"
 echo "  Mode:      hybrid multi-worker (file backend disabled)"
+echo "  Captcha:   provider=${GROK2API_CAPTCHA_PROVIDER} inline=${GROK2API_INLINE_SOLVER} threads=${TURNSTILE_THREAD}"
 echo ""
 
 exec $PY app.py

@@ -2,7 +2,7 @@
 
 把 **Grok OIDC 登录态** 转成 **OpenAI / Anthropic 兼容 API**，并附带 Web 管理台：多 API Key、多账号轮询、设备码 / 导入 / 协议注册。
 
-**当前版本：v1.9.22（高并发 hybrid）**
+**当前版本：v1.9.23（高并发 hybrid · 内联本地过盾）**
 
 [![GHCR](https://img.shields.io/badge/ghcr.io-hm2899%2Fgrokcli--2api-blue)](https://github.com/users/HM2899/packages/container/package/grokcli-2api)
 
@@ -44,7 +44,7 @@
 | 冷却状态 | free-usage 等写入 DB；测活成功恢复为「冷却中」→ 正常 |
 | Token 续期 | 后台 leader 维护；支持单选/多选立即续期 |
 | 模型探测 | 单账号 / 多选批量 / 全量；状态实时回填 |
-| 协议注册 | MoeMail + YesCaptcha，多线程批量；入池后延迟测活 |
+| 协议注册 | MoeMail + 本地内联过盾 / YesCaptcha，多线程批量；入池后延迟测活 |
 | 用量统计 | 代理侧 token / 请求：今日·近 N 天·累计；按 Key / 账号 / 模型；请求明细 |
 
 ---
@@ -64,6 +64,32 @@ curl -fsS http://127.0.0.1:3000/health
 ```
 
 浏览器打开：`http://127.0.0.1:3000/admin`
+
+#### 启动时指定打码线程数
+
+主容器内联过盾线程数由 `TURNSTILE_THREAD` 控制（默认与注册并发一致，当前默认 **3**）：
+
+```bash
+# compose 启动时直接传参
+TURNSTILE_THREAD=3 GROK2API_REG_CONCURRENCY=3 docker compose up -d --build
+
+# 或写入 .env
+# GROK2API_CAPTCHA_PROVIDER=local
+# GROK2API_INLINE_SOLVER=1
+# GROK2API_REG_CONCURRENCY=3
+# TURNSTILE_THREAD=3
+```
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `GROK2API_CAPTCHA_PROVIDER` | `local` | `local`（容器内联）/ `yescaptcha` |
+| `GROK2API_INLINE_SOLVER` | `1` | `1` 时入口脚本在主容器内启动过盾 |
+| `GROK2API_REG_CONCURRENCY` | `3` | 协议注册默认并发 |
+| `TURNSTILE_THREAD` | `= REG_CONCURRENCY` | 本地过盾浏览器线程数 |
+| `TURNSTILE_BROWSER_TYPE` | `camoufox` | 过盾浏览器类型 |
+| `TURNSTILE_PORT` | `5072` | 内联过盾监听端口（容器内 loopback） |
+
+> 2 核小机器建议 `TURNSTILE_THREAD=1~2`；`3` 已较重，`5` 容易把 CPU/内存打满。
 
 **默认只映射应用端口 `3000`。**  
 栈内 **PostgreSQL / Redis 不绑定宿主机端口**，仅通过 compose 内网访问：
@@ -98,7 +124,7 @@ ghcr.io/hm2899/grokcli-2api
 **正确示例：**
 
 ```bash
-docker pull ghcr.io/hm2899/grokcli-2api:1.9.22
+docker pull ghcr.io/hm2899/grokcli-2api:1.9.23
 # 或
 docker pull ghcr.io/hm2899/grokcli-2api:latest
 ```
@@ -133,7 +159,7 @@ services:
       retries: 10
 
   grokcli-2api:
-    image: ghcr.io/hm2899/grokcli-2api:1.9.22
+    image: ghcr.io/hm2899/grokcli-2api:1.9.23
     ports:
       - "3000:3000"
     environment:
@@ -241,7 +267,8 @@ Claude Code / Cursor / Cherry Studio：Base URL 填服务地址（通常带 `/v1
 | 日志 | 登录、账号、Key、探测、设置等记录 |
 | 设置 | 轮询与冷却策略等 |
 
-协议注册依赖 **MoeMail** + **YesCaptcha**（环境变量或管理台配置，存 PG）。  
+协议注册依赖 **MoeMail** + **过盾**（本地内联 Turnstile Solver 或 YesCaptcha；环境变量或管理台配置，存 PG）。  
+本地过盾默认与主容器同进程（`127.0.0.1:5072`），**无需填写 URL**；选 YesCaptcha 时仅用云端 Key。  
 邮箱有效期：1 小时 / 1 天 / 3 天 / 永久。  
 新注册账号入池后默认 **延迟 30s** 再自动测活（`GROK2API_REG_PROBE_DELAY_SEC`）。
 
@@ -264,13 +291,13 @@ docker compose logs -f grokcli-2api
 
 ```bash
 # app.py 中 APP_VERSION 必须与 tag 一致（且镜像路径全小写）
-git tag v1.9.22
-git push origin v1.9.22
+git tag v1.9.23
+git push origin v1.9.23
 ```
 
 成功后可拉取（**必须小写**）：
 
-- `ghcr.io/hm2899/grokcli-2api:1.9.22`
+- `ghcr.io/hm2899/grokcli-2api:1.9.23`
 - `ghcr.io/hm2899/grokcli-2api:latest`（打 `v*` tag 时）
 - `ghcr.io/hm2899/grokcli-2api:edge`（`main` 分支）
 
@@ -289,7 +316,8 @@ scripts/build_admin_assets.py         # 管理台静态资源打包
 docs/UPGRADE.md                       # 升级说明
 static/                               # 管理台前端
 grok-build-auth/                      # 协议注册引擎（vendored）
-docker-compose.yml                    # redis + postgres（内网）+ app
+turnstile-solver/                     # 本地过盾（默认内联进主容器）
+docker-compose.yml                    # redis + postgres（内网）+ app（内联过盾）
 .github/workflows/docker-publish.yml  # GHCR 多架构构建（小写镜像名）
 ```
 
@@ -306,14 +334,15 @@ docker-compose.yml                    # redis + postgres（内网）+ app
 
 ## 版本
 
-- **v1.9.22**（当前）：hybrid 下 **live 账号读取不再依赖本地 `auth.json` 是否存在**（注册只写 PG 时也能进池）；PG 主存不再堆 `auth.bak.*`；compose **取消 Postgres/Redis 宿主机端口绑定**；README 明确 GHCR **小写镜像名**
+- **v1.9.23**（当前）：协议注册支持 **主容器内联本地过盾**（`turnstile-solver` 子模块）；管理台过盾方式可选本地/YesCaptcha，本地模式不展示 URL；compose/启动支持 `TURNSTILE_THREAD` 打码线程参数
+- **v1.9.22**：hybrid 下 **live 账号读取不再依赖本地 `auth.json` 是否存在**（注册只写 PG 时也能进池）；PG 主存不再堆 `auth.bak.*`；compose **取消 Postgres/Redis 宿主机端口绑定**；README 明确 GHCR **小写镜像名**
 - **v1.9.21**：OpenAI **Responses API**（`/v1/responses`）；代理侧 **Token / 请求用量统计**；管理台「用量」页
 - **v1.9.20**：代理侧用量统计初版与管理台用量页
 - **v1.9.19**：高并发 **hybrid** 默认强制（PostgreSQL + Redis + multi-worker）；GHCR 多架构发布；JSON→PG 迁移
 - **v1.8.x**：文件后端时代（`data/*.json` 权威存储）
 - 更早变更见 [GitHub Releases](https://github.com/HM2899/grokcli-2api/releases)
 
-> 镜像 tag 与 `app.py` 中 `APP_VERSION` 一致（当前 **1.9.22**）。推 `main` 会打 `edge` 与版本号；打 `v1.9.22` tag 会额外发布 `latest`。  
+> 镜像 tag 与 `app.py` 中 `APP_VERSION` 一致（当前 **1.9.23**）。推 `main` 会打 `edge` 与版本号；打 `v1.9.23` tag 会额外发布 `latest`。  
 > 拉取路径固定为 **`ghcr.io/hm2899/grokcli-2api`**（全小写）。
 
 ## License

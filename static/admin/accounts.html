@@ -253,7 +253,7 @@
   <div class="g2a-card-head">
     <div>
       <h3>协议注册</h3>
-      <p>MoeMail + YesCaptcha 自动建号并导入账号池。配置保存到数据库，重启后自动恢复。</p>
+      <p>MoeMail + 过盾服务自动建号并导入账号池。本地过盾以内联方式运行（无需填写 URL）；也可切换到 YesCaptcha 云端。</p>
     </div>
     <div class="g2a-actions">
       <button class="g2a-btn g2a-btn-default" id="btn-save-reg">保存配置</button>
@@ -267,9 +267,19 @@
     <div class="g2a-field"><label>MoeMail API Key</label><input id="reg-api-key" placeholder="mk_..." /></div>
     <div class="g2a-field"><label>邮箱域名</label><input id="reg-domain" placeholder="example.com" /></div>
     <div class="g2a-field"><label>前缀</label><input id="reg-prefix" placeholder="可选" /></div>
-    <div class="g2a-field"><label>YesCaptcha Key</label><input id="reg-yescaptcha-key" placeholder="..." /></div>
+    <div class="g2a-field">
+      <label for="reg-captcha-provider">过盾方式</label>
+      <select id="reg-captcha-provider">
+        <option value="local">本地过盾（容器内联）</option>
+        <option value="yescaptcha">YesCaptcha</option>
+      </select>
+    </div>
+    <div class="g2a-field" id="reg-yescaptcha-wrap" style="display:none">
+      <label>YesCaptcha Key</label>
+      <input id="reg-yescaptcha-key" placeholder="仅 YesCaptcha 模式需要" />
+    </div>
     <div class="g2a-field"><label>数量</label><input id="reg-count" type="number" min="1" value="1" /></div>
-    <div class="g2a-field"><label title="同时注册的线程数：3 就是同时只跑 3 个，完成一个再补一个">线程数</label><input id="reg-concurrency" type="number" min="1" max="10" value="3" /></div>
+    <div class="g2a-field"><label title="同时注册的线程数：3 就是同时只跑 3 个，完成一个再补一个">线程数</label><input id="reg-concurrency" type="number" min="1" max="10" value="5" /></div>
     <div class="g2a-field"><label title="同一波线程启动时的错峰间隔（毫秒）">错峰 ms</label><input id="reg-stagger-ms" type="number" min="0" value="300" /></div>
     <div class="g2a-field">
       <label for="reg-expiry-ms">邮箱有效期</label>
@@ -354,10 +364,10 @@
       </div>
     </div>
   </div>
-  <script src="/static/dist/utils.01c8435e0d.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/api.6aae993021.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/state.457ea89640.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/auth.6af43e398e.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/core.1b0f3d648f.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/utils.360f09cd20.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/api.b6d8a65a8a.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/state.da9974e23b.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/auth.4835665ff4.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.8a74db1e76.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
 </body>
 </html>
