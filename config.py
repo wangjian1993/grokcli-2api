@@ -167,6 +167,11 @@ MODEL_HEALTH_STARTUP_DELAY = _env_float(
 # Max accounts to refresh/probe per background cycle (rest deferred)
 TOKEN_REFRESH_BATCH = _env_int("GROK2API_TOKEN_REFRESH_BATCH", 40, maximum=500)
 MODEL_PROBE_BATCH = _env_int("GROK2API_MODEL_PROBE_BATCH", 30, maximum=500)
+# Manual / admin probes: max models per account in one cycle (background always 1).
+# Prevents PROBE_MODELS cartesian explosion from freezing large pools.
+MODEL_PROBE_MAX_MODELS_PER_ACCOUNT = _env_int(
+    "GROK2API_MODEL_PROBE_MAX_MODELS_PER_ACCOUNT", 2, minimum=1, maximum=16
+)
 # Serialize heavy maintenance so refresh + probe never stampede together.
 # Token refresh may wait this long for a probe cycle to finish.
 MAINTENANCE_LOCK_TIMEOUT = _env_float(
@@ -199,6 +204,14 @@ XAI_PROXY = (
     or os.getenv("GROK2API_PROXY")
     or ""
 ).strip()
+# Multi-line proxy pool (preferred). Falls back to XAI_PROXY when empty.
+# One proxy per line / comma / semicolon. Supports host:port:user:pass.
+XAI_PROXY_POOL = (
+    os.getenv("GROK2API_XAI_PROXY_POOL")
+    or os.getenv("GROK2API_PROXY_POOL")
+    or XAI_PROXY
+    or ""
+).strip()
 XAI_PROXY_USERNAME = (
     os.getenv("GROK2API_XAI_PROXY_USERNAME")
     or os.getenv("GROK2API_PROXY_USERNAME")
@@ -209,6 +222,12 @@ XAI_PROXY_PASSWORD = (
     or os.getenv("GROK2API_PROXY_PASSWORD")
     or ""
 ).strip()
+# Proxy rotation for multi-proxy pools: round_robin | random | sticky
+XAI_PROXY_STRATEGY = (
+    os.getenv("GROK2API_XAI_PROXY_STRATEGY")
+    or os.getenv("GROK2API_PROXY_STRATEGY")
+    or "round_robin"
+).strip().lower() or "round_robin"
 MOEMAIL_BASE_URL = os.getenv("GROK2API_MOEMAIL_BASE_URL", "https://moemail.example.com")
 MOEMAIL_API_KEY = os.getenv("GROK2API_MOEMAIL_API_KEY", "")
 MOEMAIL_DOMAIN = os.getenv("GROK2API_MOEMAIL_DOMAIN", "example.com")

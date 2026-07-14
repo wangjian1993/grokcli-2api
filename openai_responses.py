@@ -37,6 +37,76 @@ def _stringify(v: Any) -> str:
         return str(v)
 
 
+# Local mirror of anthropic_compat._TOOL_REQUIRED_KEYS for the import-failure
+# fallback in ResponsesLiveStreamer._args_ready. Keep in sync when adding tools.
+_LOCAL_TOOL_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
+    "read": ("file_path",),
+    "write": ("file_path", "content"),
+    "edit": ("file_path", "old_string", "new_string"),
+    "update": ("file_path", "old_string", "new_string"),
+    "multiedit": ("file_path", "edits"),
+    "notebookedit": ("notebook_path", "new_source"),
+    "bash": ("command",),
+    "shell": ("command",),
+    "grep": ("pattern",),
+    "glob": ("pattern",),
+    "webfetch": ("url",),
+    "websearch": ("query",),
+    "web_search": ("query",),
+}
+
+
+def _local_tool_name_key(name: str | None) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9_]+", "", (name or "").strip().lower())
+
+
+def _local_required_keys_for_tool(name: str | None) -> tuple[str, ...]:
+    key = _local_tool_name_key(name)
+    if not key:
+        return ()
+    if key in _LOCAL_TOOL_REQUIRED_KEYS:
+        return _LOCAL_TOOL_REQUIRED_KEYS[key]
+    for short, req in _LOCAL_TOOL_REQUIRED_KEYS.items():
+        if key.endswith(short) or key.endswith(f"_{short}"):
+            return req
+    return ()
+
+
+def _local_tool_args_ready(args: str, *, tool_name: str | None = None) -> bool:
+    """Import-safe readiness gate matching anthropic_compat rules.
+
+    Used only when anthropic_compat cannot be imported. Incomplete objects
+    (missing required keys) must stay held so we never open response.created
+    on a turn that may end empty/malformed for Claude Code.
+    """
+    text = str(args or "").strip()
+    if not text or text[0] not in "{[":
+        return False
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return False
+    if not isinstance(parsed, (dict, list)):
+        return False
+    if parsed == {} or parsed == []:
+        return False
+    if isinstance(parsed, dict):
+        required = _local_required_keys_for_tool(tool_name)
+        for k in required:
+            if k not in parsed:
+                return False
+            val = parsed.get(k)
+            if val is None:
+                return False
+            if isinstance(val, str) and not val.strip():
+                return False
+            if isinstance(val, (list, dict)) and not val:
+                return False
+    return True
+
+
 def _content_parts_to_text(content: Any) -> str:
     if content is None:
         return ""
@@ -776,22 +846,72 @@ def failed_responses_sse(
     response_id: str,
     message: str,
     err_type: str = "server_error",
+    model: str | None = None,
+    sequence_number: int | None = None,
+    open_envelope: bool = True,
 ) -> list[str]:
-    """Emit a terminal response.failed event with sequence_number=0."""
+    """Emit a terminal Responses failure stream.
+
+    Bare ``response.failed`` at seq 0 (no prior ``response.created``) and
+    ``response.failed`` that rewinds ``sequence_number`` after live deltas both
+    make Claude Code / sub2api report
+    ``API returned an empty or malformed response (HTTP 200)``.
+
+    Defaults:
+    - Never-opened stream (``sequence_number is None`` and ``open_envelope``):
+      emit ``response.created`` → ``response.in_progress`` → ``response.failed``
+      with monotonic sequence numbers starting at 0.
+    - Already-open stream (pass the next ``sequence_number``): emit only
+      ``response.failed`` at that number so the sequence never rewinds.
+    """
+    frames: list[str] = []
+    if sequence_number is None:
+        seq = _Seq(0)
+        if open_envelope:
+            initial: dict[str, Any] = {
+                "id": response_id,
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": "in_progress",
+                "model": model or "",
+                "output": [],
+                "usage": chat_usage_to_responses_usage(None),
+            }
+            frames.append(
+                sse_event(
+                    "response.created",
+                    {"type": "response.created", "response": initial},
+                    sequence_number=seq.next(),
+                )
+            )
+            frames.append(
+                sse_event(
+                    "response.in_progress",
+                    {"type": "response.in_progress", "response": initial},
+                    sequence_number=seq.next(),
+                )
+            )
+        fail_seq = seq.next()
+    else:
+        fail_seq = int(sequence_number)
+
+    failed_response: dict[str, Any] = {
+        "id": response_id,
+        "object": "response",
+        "status": "failed",
+        "error": {"type": err_type, "message": message},
+    }
+    if model:
+        failed_response["model"] = model
     payload = {
         "type": "response.failed",
-        "sequence_number": 0,
-        "response": {
-            "id": response_id,
-            "object": "response",
-            "status": "failed",
-            "error": {"type": err_type, "message": message},
-        },
+        "response": failed_response,
     }
-    return [
-        sse_event("response.failed", payload, sequence_number=0),
-        "data: [DONE]\n\n",
-    ]
+    frames.append(
+        sse_event("response.failed", payload, sequence_number=fail_seq)
+    )
+    frames.append("data: [DONE]\n\n")
+    return frames
 
 
 class ResponsesLiveStreamer:
@@ -830,6 +950,42 @@ class ResponsesLiveStreamer:
 
     def _emit(self, event: str, payload: dict[str, Any]) -> str:
         return sse_event(event, payload, sequence_number=self._seq.next())
+
+    def next_sequence_number(self) -> int:
+        """Next sequence_number that would be assigned (does not advance)."""
+        return int(self._seq.n)
+
+    def fail(self, message: str, *, err_type: str = "server_error") -> list[str]:
+        """Terminal failure frames with monotonic sequence_number.
+
+        Opens the envelope first when nothing has been sent yet, so clients
+        always see ``response.created`` before ``response.failed``. After live
+        deltas, continues the existing counter instead of rewinding to 0 —
+        rewinds are reported by Claude Code as empty/malformed HTTP 200.
+        """
+        if self._closed:
+            return []
+        frames: list[str] = []
+        if not self._started:
+            frames.extend(self.start())
+        failed_response: dict[str, Any] = {
+            "id": self.response_id,
+            "object": "response",
+            "status": "failed",
+            "model": self.model,
+            "error": {"type": err_type, "message": message},
+        }
+        if self.previous_response_id:
+            failed_response["previous_response_id"] = self.previous_response_id
+        frames.append(
+            self._emit(
+                "response.failed",
+                {"type": "response.failed", "response": failed_response},
+            )
+        )
+        frames.append("data: [DONE]\n\n")
+        self._closed = True
+        return frames
 
     def _initial_response(self) -> dict[str, Any]:
         obj: dict[str, Any] = {
@@ -897,6 +1053,25 @@ class ResponsesLiveStreamer:
         ]
         self._output_index += 1
         return frames
+
+    def has_client_payload(self) -> bool:
+        """True when the client has received real text or a completed tool.
+
+        Envelope-only streams (response.created with no output items) are what
+        Claude Code / sub2api report as
+        ``API returned an empty or malformed response (HTTP 200)``.
+        """
+        if any(str(p or "") for p in self._text_parts):
+            return True
+        if self._tool_done:
+            return True
+        # Tools opened+args emitted but not yet closed still count as payload.
+        for idx, slot in self._tools.items():
+            if idx in self._tool_done:
+                return True
+            if slot.get("args_emitted") and (slot.get("name") or "").strip():
+                return True
+        return False
 
     def on_text_delta(self, delta: str) -> list[str]:
         if not delta or self._closed:
@@ -977,6 +1152,15 @@ class ResponsesLiveStreamer:
             return cur + inc
 
     def _args_ready(self, args: str, *, tool_name: str | None = None) -> bool:
+        """True when tool args are safe to emit mid-stream.
+
+        Prefer anthropic_compat's required-key gate when available. Fall back to a
+        local copy of the same rules so a missing pydantic/import error cannot
+        open the Responses envelope on syntactically-complete but incomplete
+        tool objects (e.g. Read with ``{"path":...}`` instead of ``file_path``).
+        Opening early freezes Claude Code / sub2api into an empty/malformed
+        HTTP 200 if the turn later yields no client-visible payload.
+        """
         try:
             import anthropic_compat as anth
 
@@ -986,14 +1170,7 @@ class ResponsesLiveStreamer:
                 )
             )
         except Exception:
-            text = str(args or "").strip()
-            if not text or text[0] not in "{[":
-                return False
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                return False
-            return isinstance(parsed, (dict, list)) and parsed not in ({}, [])
+            return _local_tool_args_ready(args or "", tool_name=tool_name)
 
     def _emit_ready_tools(self) -> list[str]:
         """Emit at most one complete tool at a time (name + full JSON args).
@@ -1101,10 +1278,53 @@ class ResponsesLiveStreamer:
             break
         return frames
 
+    def _tool_is_ready(self, idx: int, *, terminal: bool = False) -> bool:
+        """True when tool slot idx can be shipped (mid-stream or terminal rules)."""
+        if idx in self._tool_done:
+            return False
+        slot = self._tools.get(idx)
+        if not slot:
+            return False
+        name = (slot.get("name") or "").strip()
+        if not name:
+            return False
+        args = slot.get("arguments") or ""
+        if terminal:
+            return self._terminal_args(args if isinstance(args, str) else str(args)) is not None
+        return self._args_ready(args, tool_name=name)
+
+    def _any_shipable_tool(self, *, terminal: bool = False) -> bool:
+        for idx in sorted(self._tools.keys()):
+            # Respect ordering: a lower unfinished non-empty slot blocks later ones.
+            blocked = False
+            for lower in range(0, idx):
+                if lower in self._tool_done:
+                    continue
+                low = self._tools.get(lower)
+                if not low:
+                    continue
+                if (
+                    low.get("name")
+                    or low.get("call_id")
+                    or str(low.get("arguments") or "").strip()
+                ):
+                    # Lower slot exists; only ship if that lower one is ready too.
+                    if not self._tool_is_ready(lower, terminal=terminal):
+                        blocked = True
+                        break
+            if blocked:
+                break
+            if self._tool_is_ready(idx, terminal=terminal):
+                return True
+        return False
+
     def on_tool_delta(self, tool_calls: list[dict[str, Any]] | None) -> list[str]:
         if not tool_calls or self._closed:
             return []
-        frames = self.start()
+        # Merge slots first WITHOUT opening the Responses envelope. Incomplete
+        # tool previews must not emit response.created — that would lock
+        # secondary relays into a stream that may end with zero output items
+        # (Claude Code: empty/malformed HTTP 200) and block account failover.
         for tc in tool_calls:
             if not isinstance(tc, dict):
                 continue
@@ -1128,7 +1348,13 @@ class ResponsesLiveStreamer:
                 if not isinstance(args_piece, str):
                     args_piece = _stringify(args_piece)
                 slot["arguments"] = self._merge_tool_args(slot.get("arguments") or "", args_piece or "", tool_name=slot.get("name") or "")
-        # Only emit tools whose name+complete JSON args are ready.
+        # CRITICAL: open envelope BEFORE emitting tool frames so sequence_number
+        # stays monotonic (0=response.created, 1=in_progress, then tools…).
+        # Emitting tools first assigned seq 0..N to tools and later created got
+        # higher numbers — Claude Code / sub2api treat that as malformed HTTP 200.
+        if not self._any_shipable_tool(terminal=False):
+            return []
+        frames = self.start()
         frames.extend(self._emit_ready_tools())
         return frames
 
@@ -1175,6 +1401,27 @@ class ResponsesLiveStreamer:
         self._text_open = False
         return frames
 
+    def _terminal_args(self, args: str) -> str | None:
+        """Normalize tool args for end-of-stream flush.
+
+        Returns None when args are truncated non-JSON (unsafe to ship).
+        Empty args become ``{}``. Complete JSON objects/arrays pass through even
+        when mid-stream required-key checks would still hold them.
+        """
+        text = str(args or "").strip()
+        if not text:
+            return "{}"
+        if text[0] not in "{[":
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        if not isinstance(parsed, (dict, list)):
+            return None
+        # Empty containers are OK at terminal flush (better than silent empty turn).
+        return text
+
     def _close_open_tools(self) -> list[str]:
         """Flush any still-held tools at stream end (best-effort complete JSON)."""
         frames: list[str] = []
@@ -1184,7 +1431,7 @@ class ResponsesLiveStreamer:
             if not more:
                 break
             frames.extend(more)
-        # Terminal flush: emit remaining known tools even if args incomplete.
+        # Terminal flush: emit remaining named tools with parseable JSON args.
         for idx in sorted(self._tools.keys()):
             if idx in self._tool_done:
                 continue
@@ -1195,8 +1442,12 @@ class ResponsesLiveStreamer:
                 continue
             if not name:
                 continue
-            if not str(args).strip():
-                args = "{}"
+            term_args = self._terminal_args(args if isinstance(args, str) else str(args))
+            if term_args is None:
+                # Truncated stream (e.g. '{"path":') — do not ship garbage.
+                continue
+            args = term_args
+            slot["arguments"] = args
             if idx not in self._tool_opened:
                 if not slot.get("call_id"):
                     slot["call_id"] = f"call_{uuid.uuid4().hex[:24]}"
@@ -1267,45 +1518,130 @@ class ResponsesLiveStreamer:
             self._tool_done.add(idx)
         return frames
 
+    def _build_completed_response(
+        self,
+        *,
+        usage: dict[str, Any] | None = None,
+        reasoning: str = "",
+    ) -> dict[str, Any]:
+        """Assemble response.completed payload using the SAME item ids as the stream.
+
+        ``build_responses_object`` mints fresh msg_/fc_ ids. Claude Code / sub2api
+        correlate stream item ids with the terminal object; mismatched ids look
+        like an empty/malformed completed envelope (HTTP 200).
+        """
+        output: list[dict[str, Any]] = []
+        text = "".join(self._text_parts)
+        if text:
+            output.append(
+                {
+                    "id": self._msg_id or new_output_item_id("msg"),
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                }
+            )
+
+        for idx in sorted(self._tools.keys()):
+            if idx not in self._tool_done:
+                # Only include tools that were actually shipped to the client.
+                continue
+            slot = self._tools[idx]
+            name = (slot.get("name") or "").strip()
+            args = slot.get("arguments") or "{}"
+            if not isinstance(args, str):
+                args = _stringify(args)
+            output.append(
+                {
+                    "id": slot.get("id") or new_output_item_id("fc"),
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": slot.get("call_id") or f"call_{uuid.uuid4().hex[:24]}",
+                    "name": name or "",
+                    "arguments": args or "{}",
+                }
+            )
+
+        obj: dict[str, Any] = {
+            "id": self.response_id,
+            "object": "response",
+            "created_at": int(self.created_at),
+            "status": "completed",
+            "model": self.model,
+            "output": output,
+            "usage": chat_usage_to_responses_usage(usage),
+        }
+        if self.previous_response_id:
+            obj["previous_response_id"] = self.previous_response_id
+        if self.metadata:
+            obj["metadata"] = self.metadata
+        if reasoning:
+            obj["x_grok2api_reasoning"] = reasoning
+        return obj
+
     def complete(
         self,
         *,
         usage: dict[str, Any] | None = None,
         reasoning: str = "",
+        force_flush_partial_tools: bool = True,
     ) -> list[str]:
+        """Finish the Responses stream.
+
+        Returns ``[]`` when nothing client-visible was produced. Callers must
+        treat that as empty upstream (failover / response.failed) instead of
+        inventing a completed envelope — Claude Code reports empty completed
+        streams as ``API returned an empty or malformed response (HTTP 200)``.
+
+        Mid-stream emission stays strict (required keys). Terminal flush
+        (default on) ships named tools whose args are at least valid JSON, so
+        a finished turn with real tools is not mistaken for empty upstream.
+        Truncated non-JSON args are still dropped.
+
+        Envelope frames are always emitted before tool/text body frames so
+        ``sequence_number`` stays monotonic.
+        """
         if self._closed:
             return []
-        frames = self.start()
-        frames.extend(self._close_open_text())
-        frames.extend(self._close_open_tools())
-        # Build terminal response object for clients that only read completed.
-        tool_calls: list[dict[str, Any]] = []
-        for idx in sorted(self._tools.keys()):
-            slot = self._tools[idx]
-            if not slot.get("name") and not slot.get("arguments"):
-                continue
-            tool_calls.append(
-                {
-                    "id": slot.get("call_id") or f"call_{uuid.uuid4().hex[:24]}",
-                    "type": "function",
-                    "function": {
-                        "name": slot.get("name") or "",
-                        "arguments": slot.get("arguments") or "{}",
-                    },
-                }
-            )
-        final = build_responses_object(
-            response_id=self.response_id,
-            model=self.model,
-            content="".join(self._text_parts),
-            reasoning=reasoning or "",
-            tool_calls=tool_calls or None,
-            usage=usage,
-            status="completed",
-            created_at=self.created_at,
-            previous_response_id=self.previous_response_id,
-            metadata=self.metadata,
+
+        has_text = any(str(p or "") for p in self._text_parts)
+        # Already shipped payload?
+        already = self.has_client_payload() or has_text
+        can_ship_strict = self._any_shipable_tool(terminal=False)
+        can_ship_terminal = (
+            force_flush_partial_tools and self._any_shipable_tool(terminal=True)
         )
+        if not already and not can_ship_strict and not can_ship_terminal:
+            self._closed = True
+            return []
+
+        # Open envelope FIRST (seq 0,1) before any tool/text body events.
+        frames = self.start()
+
+        # Prefer strict-ready tools first, then terminal flush of parseable JSON.
+        while True:
+            more = self._emit_ready_tools()
+            if not more:
+                break
+            frames.extend(more)
+
+        if force_flush_partial_tools:
+            frames.extend(self._close_open_tools())
+
+        frames.extend(self._close_open_text())
+
+        if not self.has_client_payload() and not has_text:
+            # Safety: should be unreachable after the pre-check, but never emit
+            # an empty completed envelope.
+            self._closed = True
+            return []
+
+        final = self._build_completed_response(usage=usage, reasoning=reasoning or "")
+        if not final.get("output"):
+            self._closed = True
+            return []
+
         frames.append(
             self._emit(
                 "response.completed",

@@ -366,6 +366,11 @@ def _ensure_tool_parameters(params: Any) -> dict[str, Any]:
 
 
 def anthropic_tools_to_openai(tools: list[Any] | None) -> list[dict[str, Any]] | None:
+    """Convert Anthropic tools → OpenAI function tools (stable name order).
+
+    Sorting by tool name keeps multi-turn prompt prefixes byte-stable when
+    clients reshuffle tools arrays — important for automatic upstream cache.
+    """
     if not tools:
         return None
     out: list[dict[str, Any]] = []
@@ -405,7 +410,18 @@ def anthropic_tools_to_openai(tools: list[Any] | None) -> list[dict[str, Any]] |
         )
         fn["parameters"] = _ensure_tool_parameters(schema)
         out.append({"type": "function", "function": fn})
-    return out or None
+    if not out:
+        return None
+    out.sort(
+        key=lambda t: str(
+            ((t.get("function") or {}) if isinstance(t.get("function"), dict) else {}).get(
+                "name"
+            )
+            or t.get("name")
+            or ""
+        ).lower()
+    )
+    return out
 
 
 def anthropic_tool_choice_to_openai(tool_choice: Any) -> Any:
