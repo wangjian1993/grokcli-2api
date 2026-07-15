@@ -420,13 +420,18 @@ function rebindPageControls() {
   try { bindLogsControls(); } catch (_) {}
   try { bindUsageControls(); } catch (_) {}
   try { hideEmptyLogPanels(); } catch (_) {}
+  // Soft-nav replaces .g2a-content; sub2api buttons must be rebound every time.
+  try { bindSub2apiUi(); } catch (_) {}
   // Soft-nav swaps DOM; re-show active registration card + keep polling if needed.
   // Full page refresh loses in-memory ids — restore from backend when missing.
   try {
     const page = document.body.dataset.page || pageFromPath(location.pathname) || "";
     if (page === "accounts") {
+      // Soft-nav keeps JS heap, but hard-refresh recovery may land here first.
+      if (!hasTrackedRegTask()) applyRegTrack(loadRegTrack());
       if (hasTrackedRegTask()) {
         showPanel("reg-session-box");
+        // Never re-poll a finished card (avoids completion-toast spam).
         if (!regFinishedNotified) startRegPolling({ immediate: true });
       } else {
         restoreActiveRegistration({ force: true, toastIfEmpty: false }).catch(() => {});
@@ -1317,6 +1322,9 @@ function renderAccountsPage() {
       const refreshPill = a.has_refresh_token
         ? '<span class="g2a-tag ok" title="可自动 refresh">可自动续期</span>'
         : '<span class="g2a-tag warn">无 refresh</span>';
+      const ssoPill = a.has_sso
+        ? '<span class="g2a-tag ok" title="账号库已保存 SSO cookie">SSO</span>'
+        : '<span class="g2a-tag" title="未保存 SSO cookie">无SSO</span>';
       const liveQ = quotaCache[a.id];
       const probeCell = fmtProbeCell(p.last_probe, p.last_error, p.blocked_model_ids);
       const checked = selectedAccountIds.has(a.id) ? "checked" : "";
@@ -1332,7 +1340,7 @@ function renderAccountsPage() {
       <td style="font-size:0.78rem;min-width:160px">${probeCell}</td>
       <td style="font-size:0.8rem;min-width:150px">
         ${expiryCell}
-        <div style="margin-top:6px">${refreshPill}</div>
+        <div style="margin-top:6px">${refreshPill} ${ssoPill}</div>
       </td>
       <td class="g2a-actions">
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="renew-one" data-id="${esc(a.id)}" ${a.has_refresh_token ? "" : "disabled title=\"无 refresh_token，无法续期\""}>续期</button>
@@ -1549,6 +1557,9 @@ function renderOneAccountRow(account) {
   const refreshPill = a.has_refresh_token
     ? '<span class="g2a-tag ok" title="可自动 refresh">可自动续期</span>'
     : '<span class="g2a-tag warn">无 refresh</span>';
+  const ssoPill = a.has_sso
+    ? '<span class="g2a-tag ok" title="账号库已保存 SSO cookie">SSO</span>'
+    : '<span class="g2a-tag" title="未保存 SSO cookie">无SSO</span>';
   const liveQ = quotaCache[a.id];
   const probeCell = fmtProbeCell(p.last_probe, p.last_error, p.blocked_model_ids);
   const checked = selectedAccountIds.has(a.id) ? "checked" : "";
@@ -1564,7 +1575,7 @@ function renderOneAccountRow(account) {
       <td style="font-size:0.78rem;min-width:160px">${probeCell}</td>
       <td style="font-size:0.8rem;min-width:150px">
         ${expiryCell}
-        <div style="margin-top:6px">${refreshPill}</div>
+        <div style="margin-top:6px">${refreshPill} ${ssoPill}</div>
       </td>
       <td class="g2a-actions">
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="renew-one" data-id="${esc(a.id)}" ${a.has_refresh_token ? "" : "disabled title=\"无 refresh_token，无法续期\""}>续期</button>
@@ -2382,6 +2393,8 @@ function applyRegTrack(track) {
   regBatchId = batchId;
   regSessionIds = ids.length ? ids.slice() : (sid ? [sid] : []);
   regSessionId = regSessionIds[0] || sid || null;
+  // Always rehydrate finished flag from storage; never leave stale true/false from
+  // a previous soft-nav session.
   regFinishedNotified = !!track.finished;
   return hasTrackedRegTask();
 }
@@ -3225,28 +3238,17 @@ function adoptRegSessions(sessions, { batch = null, continuePolling = true } = {
   }
   if (!ids.length && !batchId) return false;
 
+  // Preserve "already finished" across restore so we never re-toast completion.
+  const wasFinished = !!regFinishedNotified;
+
   regBatchId = batchId || regBatchId || null;
   regSessionIds = ids.length ? ids.slice() : (regSessionId ? [regSessionId] : []);
   regSessionId = regSessionIds[0] || regSessionId || null;
-  regFinishedNotified = false;
   regStopping = false;
   regPollInFlight = false;
   regLastLogText = "";
   regLastStatusText = "";
   regLastEmailText = "";
-
-  if (list.length <= 1 && !regBatchId) {
-    showRegSession(list[0] || batchObj || { id: regSessionId, status: "running" }, {
-      batch: batchObj,
-    });
-  } else {
-    showRegSessionGroup(
-      list.length
-        ? list
-        : regSessionIds.map((id) => ({ id, status: "running", batch_id: regBatchId })),
-      { batch: batchObj }
-    );
-  }
 
   const batchStatus = String(
     (batchObj && (batchObj.batch_status || batchObj.status)) || ""
@@ -3259,19 +3261,69 @@ function adoptRegSessions(sessions, { batch = null, continuePolling = true } = {
       batchStatus === "error" ||
       batchStatus === "cancelled" ||
       batchStatus === "stopped" ||
+      batchStatus === "failed" ||
       (Number(batchObj.done || 0) > 0 &&
-        Number(batchObj.done || 0) >= Number(batchObj.total || batchObj.count || 0)));
+        Number(batchObj.done || 0) >= Number(batchObj.total || batchObj.count || 0) &&
+        !batchRunning) ||
+      (Number((batchObj.imported || 0) + (batchObj.error || 0) + (batchObj.cancelled || 0)) > 0 &&
+        Number((batchObj.imported || 0) + (batchObj.error || 0) + (batchObj.cancelled || 0)) >=
+          Number(batchObj.total || batchObj.count || 0) &&
+        !batchRunning));
   const allTerminal =
     list.length > 0 &&
     list.every((s) => isRegTerminalStatus(regStatusOf(s)));
-  const finished = !!batchDone || (allTerminal && !batchRunning);
+  const finished = !!wasFinished || !!batchDone || (allTerminal && !batchRunning);
 
-  if (continuePolling && !finished) {
-    startRegPolling({ immediate: true, intervalMs: 1000 });
-  } else if (finished) {
-    // One more poll paints the final summary / stops the timer cleanly.
-    pollRegSession().catch(() => {});
+  // Placeholder sessions for UI only when real session objects are missing.
+  // Never fake "running" for an already-finished batch — that freezes the card.
+  const placeholderStatus = finished
+    ? (batchStatus === "error" || batchStatus === "failed"
+        ? "error"
+        : batchStatus === "cancelled" || batchStatus === "stopped"
+          ? "cancelled"
+          : "done")
+    : "running";
+  const placeholderSessions = regSessionIds.map((id) => ({
+    id,
+    status: placeholderStatus,
+    batch_id: regBatchId,
+  }));
+
+  if (list.length <= 1 && !regBatchId) {
+    showRegSession(
+      list[0] ||
+        batchObj ||
+        { id: regSessionId, status: placeholderStatus, batch_id: regBatchId },
+      { batch: batchObj }
+    );
   } else {
+    showRegSessionGroup(list.length ? list : placeholderSessions, { batch: batchObj });
+  }
+
+  if (finished) {
+    // Already terminal: paint final card once, never re-toast via forced re-poll.
+    regFinishedNotified = true;
+    stopRegPolling();
+    // Ensure status text is not left as "restoring…"
+    try {
+      const total = Number((batchObj && (batchObj.total || batchObj.count)) || regSessionIds.length || 0);
+      const done = Number((batchObj && batchObj.done) || total || 0);
+      const ok = Number((batchObj && (batchObj.imported || batchObj.success)) || 0);
+      const fail = Number((batchObj && (batchObj.error || batchObj.failed)) || 0);
+      setRegStatusText(
+        total > 0
+          ? `已结束 · ${done}/${total}` + (ok || fail ? ` · 成功 ${ok} / 失败 ${fail}` : "")
+          : "已结束"
+      );
+      setRegEmailText(regBatchId ? `batch ${regBatchId}` : (regSessionId || "—"));
+    } catch (_) {}
+    saveRegTrack();
+    return true;
+  }
+
+  // Live task only.
+  regFinishedNotified = false;
+  if (continuePolling) {
     startRegPolling({ immediate: true, intervalMs: 1000 });
   }
   saveRegTrack();
@@ -3284,8 +3336,9 @@ async function restoreTrackedRegistration({ toastIfEmpty = false } = {}) {
   if (!track) return false;
   if (!applyRegTrack(track)) return false;
 
+  const alreadyFinished = !!(track.finished || regFinishedNotified);
   showPanel("reg-session-box");
-  setRegStatusText(track.finished ? "restoring…" : "restoring…");
+  setRegStatusText(alreadyFinished ? "已结束 · 恢复中…" : "restoring…");
   setRegEmailText(regBatchId ? `batch ${regBatchId}` : (regSessionId || "—"));
   setLogPanel(
     "reg-log",
@@ -3346,11 +3399,20 @@ async function restoreTrackedRegistration({ toastIfEmpty = false } = {}) {
       }
     }
     if (sessions.length || batch) {
+      // Preserve finished flag from sessionStorage so re-adopt does not re-toast.
+      const preserveFinished = alreadyFinished || regFinishedNotified;
       const ok = adoptRegSessions(sessions, {
         batch: batch || (regBatchId ? { id: regBatchId, batch_id: regBatchId, session_ids: regSessionIds } : null),
-        continuePolling: true,
+        continuePolling: !preserveFinished,
       });
-      if (ok) return true;
+      if (ok) {
+        if (preserveFinished) {
+          regFinishedNotified = true;
+          stopRegPolling();
+          saveRegTrack();
+        }
+        return true;
+      }
     }
     // Track exists but backend no longer has it (TTL expired / finished ages ago).
     markTrackedRegistrationMissing(batchMissing ? "batch not found" : "session not found");
@@ -3368,6 +3430,11 @@ async function restoreActiveRegistration({ force = false, toastIfEmpty = false }
     // Rehydrate from sessionStorage first (hard refresh path).
     applyRegTrack(loadRegTrack());
   }
+  // Already showing a finished card — don't re-adopt/re-toast on soft refresh.
+  if (!force && hasTrackedRegTask() && regFinishedNotified) {
+    showPanel("reg-session-box");
+    return true;
+  }
   // Always re-validate tracked ids against backend. Blindly resuming poll from a
   // stale sessionStorage track is what spammed console 404s after restarts.
   try {
@@ -3383,12 +3450,31 @@ async function restoreActiveRegistration({ force = false, toastIfEmpty = false }
 
     const activeBatches = batches
       .filter((b) => {
-        const st = String((b && (b.batch_status || b.status)) || "").toLowerCase();
-        const running = Number((b && b.running) || 0);
+        if (!b) return false;
+        const st = String((b.batch_status || b.status) || "").toLowerCase();
+        const running = Number(b.running || 0);
+        const total = Number(b.total || b.count || b.spawned || 0);
+        const done = Number(b.done || 0);
+        // Explicit live work.
         if (running > 0) return true;
-        if (!st || st === "running" || st === "starting" || st === "stopping" || st === "queued") {
+        // Terminal statuses are never "active".
+        if (
+          st === "done" ||
+          st === "partial" ||
+          st === "error" ||
+          st === "cancelled" ||
+          st === "stopped" ||
+          st === "failed"
+        ) {
+          return false;
+        }
+        // done >= total with no running → finished even if status lagging.
+        if (total > 0 && done >= total && running <= 0) return false;
+        // Only treat as active when status is clearly non-terminal / in-flight.
+        if (st === "running" || st === "starting" || st === "stopping" || st === "queued") {
           return true;
         }
+        // Unknown / empty status with no running workers is a ghost — ignore.
         return false;
       })
       .sort(
@@ -3454,9 +3540,24 @@ async function restoreActiveRegistration({ force = false, toastIfEmpty = false }
 }
 
 async function refreshRegistrationProgress({ toastIfEmpty = true } = {}) {
+  // Finished card: keep it visible, do not re-fire completion toast.
+  if (hasTrackedRegTask() && regFinishedNotified) {
+    showPanel("reg-session-box");
+    if (toastIfEmpty) toast("注册已结束（可点关闭收起进度卡片）", true);
+    return true;
+  }
   if (hasTrackedRegTask()) {
     showPanel("reg-session-box");
     await pollRegSession();
+    return true;
+  }
+  const track = loadRegTrack();
+  if (track && track.finished && applyRegTrack(track)) {
+    regFinishedNotified = true;
+    showPanel("reg-session-box");
+    setRegStatusText("已结束");
+    setRegEmailText(regBatchId ? `batch ${regBatchId}` : (regSessionId || "—"));
+    if (toastIfEmpty) toast("注册已结束（可点关闭收起进度卡片）", true);
     return true;
   }
   return restoreActiveRegistration({ force: true, toastIfEmpty });
@@ -3894,6 +3995,7 @@ async function pollRegSession() {
     const batchStatus = String(
       (batch && (batch.batch_status || batch.status)) || ""
     ).toLowerCase();
+    const batchRunningNow = Number((batch && batch.running) || 0) > 0;
     const batchDone =
       batch &&
       (batchStatus === "done" ||
@@ -3901,7 +4003,16 @@ async function pollRegSession() {
         batchStatus === "error" ||
         batchStatus === "cancelled" ||
         batchStatus === "stopped" ||
-        (Number(batch.done) > 0 && Number(batch.done) >= Number(batch.total || batch.count || 0)));
+        batchStatus === "failed" ||
+        // Counters say complete and nothing is still running.
+        (Number(batch.done || 0) > 0 &&
+          Number(batch.done || 0) >= Number(batch.total || batch.count || 0) &&
+          !batchRunningNow) ||
+        // Spawner counters already match target with no live workers (status lag).
+        (Number((batch.imported || 0) + (batch.error || 0) + (batch.cancelled || 0)) > 0 &&
+          Number((batch.imported || 0) + (batch.error || 0) + (batch.cancelled || 0)) >=
+            Number(batch.total || batch.count || 0) &&
+          !batchRunningNow));
     const batchStopping =
       !!regStopping ||
       batchStatus === "stopping" ||
@@ -3911,10 +4022,17 @@ async function pollRegSession() {
       sessions.length > 0 &&
       sessions.every((s) => REG_TERMINAL_OK.has(regStatusOf(s)) || REG_TERMINAL_BAD.has(regStatusOf(s)));
     // Prefer batch-level completion: large batches may only keep a compact session window in UI.
+    // Also finish when every observed session is terminal and batch reports no running workers,
+    // even if the UI only holds a compact window of sessions.
     const finished =
       !!batchDone ||
       (allTerminal &&
-        (targetTotal <= 0 || sessions.length >= targetTotal || !regBatchId || batchStopping));
+        !batchRunningNow &&
+        (targetTotal <= 0 ||
+          sessions.length >= targetTotal ||
+          !regBatchId ||
+          batchStopping ||
+          Number((batch && batch.done) || 0) >= targetTotal));
 
     // Fallback client-side probe for imported accounts missing backend probe.
     // Skip while stopping — no need to thrash the card with new probe lines mid-stop.
@@ -5208,6 +5326,273 @@ on("btn-logout-cli", "onclick", async () => {  if (!confirm("注销全部 Grok �
 
 
 
+
+/* ── sub2api push ───────────────────────────────────── */
+function fillSub2apiForm(cfg) {
+  cfg = cfg || {};
+  if ($("set-sub2api-enabled")) $("set-sub2api-enabled").checked = !!cfg.enabled;
+  if ($("set-sub2api-url")) $("set-sub2api-url").value = cfg.base_url || "";
+  if ($("set-sub2api-email")) $("set-sub2api-email").value = cfg.email || "";
+  // never echo password; placeholder indicates saved state
+  if ($("set-sub2api-password")) {
+    $("set-sub2api-password").value = "";
+    $("set-sub2api-password").placeholder = cfg.has_password ? "已保存，留空不改" : "登录密码";
+  }
+  if ($("set-sub2api-group-id")) {
+    $("set-sub2api-group-id").value = cfg.group_id != null && cfg.group_id !== "" ? cfg.group_id : "";
+  }
+  if ($("set-sub2api-group-name")) $("set-sub2api-group-name").value = cfg.group_name || "";
+  if ($("set-sub2api-auto-group")) $("set-sub2api-auto-group").checked = cfg.auto_create_group !== false;
+  if ($("set-sub2api-concurrency")) $("set-sub2api-concurrency").value = cfg.concurrency != null ? cfg.concurrency : 4;
+  if ($("set-sub2api-account-concurrency")) {
+    const ac = cfg.account_concurrency != null ? cfg.account_concurrency : (cfg.account_capacity != null ? cfg.account_capacity : 3);
+    $("set-sub2api-account-concurrency").value = ac;
+  }
+  if ($("set-sub2api-account-priority")) {
+    $("set-sub2api-account-priority").value = cfg.account_priority != null ? cfg.account_priority : 50;
+  }
+  if ($("set-sub2api-account-rate")) {
+    $("set-sub2api-account-rate").value = cfg.account_rate_multiplier != null ? cfg.account_rate_multiplier : 1;
+  }
+  if ($("set-sub2api-notes")) $("set-sub2api-notes").value = cfg.notes_prefix || "grokcli-2api";
+  const pill = $("sub2api-pill");
+  if (pill) {
+    if (cfg.base_url && cfg.has_password) {
+      pill.textContent = "已配置";
+      pill.className = "g2a-tag g2a-tag-ok";
+    } else if (cfg.base_url) {
+      pill.textContent = "缺密码";
+      pill.className = "g2a-tag g2a-tag-warn";
+    } else {
+      pill.textContent = "未配置";
+      pill.className = "g2a-tag";
+    }
+  }
+}
+
+function collectSub2apiPatch() {
+  if (!$("set-sub2api-url") && !$("set-sub2api-email")) return null;
+  const patch = {
+    enabled: !!( $("set-sub2api-enabled") && $("set-sub2api-enabled").checked ),
+    base_url: $("set-sub2api-url") ? ($("set-sub2api-url").value || "").trim() : "",
+    email: $("set-sub2api-email") ? ($("set-sub2api-email").value || "").trim() : "",
+    group_name: $("set-sub2api-group-name") ? ($("set-sub2api-group-name").value || "").trim() : "",
+    auto_create_group: !!( $("set-sub2api-auto-group") && $("set-sub2api-auto-group").checked ),
+    notes_prefix: $("set-sub2api-notes") ? (($("set-sub2api-notes").value || "").trim() || "grokcli-2api") : "grokcli-2api",
+  };
+  const gid = $("set-sub2api-group-id") ? ($("set-sub2api-group-id").value || "").trim() : "";
+  if (gid !== "") patch.group_id = Number(gid);
+  else patch.group_id = null;
+  const conc = $("set-sub2api-concurrency") ? ($("set-sub2api-concurrency").value || "").trim() : "";
+  if (conc !== "") patch.concurrency = Number(conc);
+  const accConc = $("set-sub2api-account-concurrency") ? ($("set-sub2api-account-concurrency").value || "").trim() : "";
+  if (accConc !== "") patch.account_concurrency = Number(accConc);
+  const accPrio = $("set-sub2api-account-priority") ? ($("set-sub2api-account-priority").value || "").trim() : "";
+  if (accPrio !== "") patch.account_priority = Number(accPrio);
+  const accRate = $("set-sub2api-account-rate") ? ($("set-sub2api-account-rate").value || "").trim() : "";
+  if (accRate !== "") patch.account_rate_multiplier = Number(accRate);
+  const pw = $("set-sub2api-password") ? ($("set-sub2api-password").value || "") : "";
+  if (pw) patch.password = pw;
+  return patch;
+}
+
+function renderSub2apiGroups(groups) {
+  const sel = $("set-sub2api-group-select");
+  if (!sel) return;
+  const cur = $("set-sub2api-group-id") ? String($("set-sub2api-group-id").value || "") : "";
+  const items = Array.isArray(groups) ? groups : [];
+  sel.innerHTML = '<option value="">— 选择已有分组 —</option>' + items.map((g) => {
+    const id = g && g.id != null ? String(g.id) : "";
+    const name = (g && (g.name || g.title)) || id;
+    const plat = g && g.platform ? ` [${g.platform}]` : "";
+    const selected = id && id === cur ? " selected" : "";
+    return `<option value="${esc(id)}"${selected}>#${esc(id)} ${esc(name)}${esc(plat)}</option>`;
+  }).join("");
+}
+
+async function saveSub2apiConfig(opts) {
+  opts = opts || {};
+  const patch = collectSub2apiPatch() || {};
+  if (opts.test) patch.test = true;
+  // Always persist via dedicated endpoint so secrets land even if main
+  // "保存设置" path is skipped or soft-nav form is partial.
+  const r = await api("/settings/sub2api", { method: "PUT", body: JSON.stringify(patch) });
+  if (r && r.config) fillSub2apiForm(r.config);
+  if (r && r.test && Array.isArray(r.test.groups)) renderSub2apiGroups(r.test.groups);
+  if (r && r.ok === false) {
+    throw new Error((r.test && r.test.error) || r.error || "sub2api 配置保存失败");
+  }
+  return r;
+}
+
+async function testSub2apiConnection() {
+  const pre = $("sub2api-test-result");
+  if (pre) { pre.style.display = "block"; pre.textContent = "测试中…"; }
+  try {
+    // Save current form first (password optional if already stored)
+    await saveSub2apiConfig({});
+    const r = await api("/settings/sub2api/test", { method: "POST", body: "{}" });
+    if (pre) pre.textContent = JSON.stringify(r, null, 2);
+    if (r && Array.isArray(r.groups)) renderSub2apiGroups(r.groups);
+    toast(r && r.ok ? `连接成功，${r.group_count || 0} 个分组` : (r && r.error) || "失败", !(r && r.ok));
+    return r;
+  } catch (e) {
+    if (pre) pre.textContent = String(e.message || e);
+    toast(e.message || String(e), true);
+    throw e;
+  }
+}
+
+async function loadSub2apiGroups() {
+  const pre = $("sub2api-test-result");
+  if (pre) { pre.style.display = "block"; pre.textContent = "刷新分组中…"; }
+  try {
+    try {
+      await saveSub2apiConfig({});
+    } catch (e) {
+      // still try list with previously saved config
+      console.warn("save before groups failed", e);
+    }
+    const r = await api("/settings/sub2api/groups");
+    renderSub2apiGroups((r && r.groups) || []);
+    if (pre) pre.textContent = JSON.stringify(r, null, 2);
+    toast(`已加载 ${(r && r.count) || 0} 个分组`);
+    return r;
+  } catch (e) {
+    if (pre) pre.textContent = String(e.message || e);
+    toast(e.message || String(e), true);
+    throw e;
+  }
+}
+
+async function createSub2apiGroup() {
+  const name = prompt("新分组名称", ($("set-sub2api-group-name") && $("set-sub2api-group-name").value) || "grokcli-2api");
+  if (!name) return;
+  try { await saveSub2apiConfig({}); } catch (_) {}
+  const r = await api("/settings/sub2api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name, platform: "grok", set_default: true }),
+  });
+  if (r && r.config) fillSub2apiForm(r.config);
+  toast(r && r.ok ? `分组已创建 #${(r.group && r.group.id) || "?"}` : "创建失败", !(r && r.ok));
+  try { await loadSub2apiGroups(); } catch (_) {}
+  return r;
+}
+
+async function pushAccountsToSub2api({ all = false } = {}) {
+  let body;
+  if (all) {
+    if (!confirm("确认将【全部账号】导入到 sub2api？")) return;
+    body = { all: true };
+  } else {
+    const ids = Array.from(selectedAccountIds || []);
+    if (!ids.length) {
+      toast("请先勾选要导入的账号", false);
+      return;
+    }
+    if (!confirm(`确认将选中的 ${ids.length} 个账号导入到 sub2api？`)) return;
+    body = { account_ids: ids };
+  }
+  // optional override from settings form if present
+  const gid = $("set-sub2api-group-id") ? ($("set-sub2api-group-id").value || "").trim() : "";
+  if (gid) body.group_id = Number(gid);
+  toast(all ? "正在导入全部账号到 sub2api…" : "正在导入选中账号到 sub2api…");
+  try {
+    const r = await api("/accounts/push-sub2api", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const ok = r && r.success != null ? r.success : 0;
+    const fail = r && r.failed != null ? r.failed : 0;
+    const total = r && r.total != null ? r.total : ok + fail;
+    toast(`sub2api 导入完成：成功 ${ok} / 失败 ${fail} / 共 ${total}`, fail !== 0);
+    if (fail && r && Array.isArray(r.results)) {
+      const firstErr = r.results.find((x) => x && !x.ok);
+      if (firstErr) console.warn("sub2api push sample error", firstErr);
+    }
+    return r;
+  } catch (e) {
+    toast(e.message || String(e), false);
+    throw e;
+  }
+}
+
+async function exportSub2apiFormat() {
+  const ids = Array.from(selectedAccountIds || []);
+  const body = ids.length ? { account_ids: ids } : { all: true };
+  if (!ids.length && !confirm("未选择账号，将导出全部账号为 sub2api 数据备份 JSON（type=sub2api-data）。继续？")) return;
+  try {
+    const r = await api("/accounts/export-sub2api-format", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    // Backend now returns pure DataPayload {type,version,proxies,accounts}.
+    // Fall back if an older server wrapped it.
+    let payload = r;
+    if (r && r.accounts && r.type !== "sub2api-data" && r.type !== "sub2api-bundle") {
+      // legacy CreateAccountRequest[] wrapper → convert client-side
+      const rows = Array.isArray(r.accounts) ? r.accounts : [];
+      payload = {
+        type: "sub2api-data",
+        version: 1,
+        exported_at: new Date().toISOString(),
+        proxies: [],
+        accounts: rows.map((row) => ({
+          name: row.name || row.email || "grok-account",
+          notes: row.notes || null,
+          platform: row.platform || "grok",
+          type: row.type || "oauth",
+          credentials: row.credentials || {},
+          extra: row.extra || {},
+          concurrency: row.concurrency != null ? row.concurrency : 3,
+          priority: row.priority != null ? row.priority : 50,
+          rate_multiplier: row.rate_multiplier != null ? row.rate_multiplier : 1.0,
+        })),
+      };
+    }
+    if (!payload || !Array.isArray(payload.accounts) || !Array.isArray(payload.proxies)) {
+      throw new Error("导出结果不是 sub2api-data 格式");
+    }
+    if (!payload.type) payload.type = "sub2api-data";
+    if (!payload.version) payload.version = 1;
+    if (!payload.exported_at) payload.exported_at = new Date().toISOString();
+    const count = payload.accounts.length;
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    // Name matches sub2api's own export convention so users recognize it.
+    a.download = `sub2api-data-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    toast(`已导出 sub2api-data：${count} 个账号（可在 sub2api「导入数据」中使用）`);
+  } catch (e) {
+    toast(e.message || String(e), true);
+  }
+}
+
+function bindSub2apiUi() {
+  on("btn-sub2api-test", "onclick", () => { testSub2apiConnection().catch(() => {}); });
+  on("btn-sub2api-load-groups", "onclick", () => { loadSub2apiGroups().catch((e) => toast(e.message || String(e), true)); });
+  on("btn-sub2api-create-group", "onclick", () => { createSub2apiGroup().catch((e) => toast(e.message || String(e), true)); });
+  on("set-sub2api-group-select", "onchange", () => {
+    const sel = $("set-sub2api-group-select");
+    if (!sel || !sel.value) return;
+    if ($("set-sub2api-group-id")) $("set-sub2api-group-id").value = sel.value;
+    const opt = sel.options[sel.selectedIndex];
+    if (opt && $("set-sub2api-group-name")) {
+      // option text: #id name [platform]
+      const t = (opt.textContent || "").replace(/^#\S+\s*/, "").replace(/\s*\[.*\]\s*$/, "").trim();
+      if (t) $("set-sub2api-group-name").value = t;
+    }
+  });
+  on("btn-acc-push-sub2api-selected", "onclick", () => { pushAccountsToSub2api({ all: false }).catch(() => {}); });
+  on("btn-acc-push-sub2api-all", "onclick", () => { pushAccountsToSub2api({ all: true }).catch(() => {}); });
+  on("btn-acc-export-sub2api-format", "onclick", () => { exportSub2apiFormat().catch(() => {}); });
+}
+// bind once when DOM ready (core.js loads at end of body)
+try { bindSub2apiUi(); } catch (_) {}
+
 /* ── System settings page ───────────────────────────── */
 function fillSystemSettingsForm(s) {
   s = s || {};
@@ -5215,12 +5600,43 @@ function fillSystemSettingsForm(s) {
   if ($("set-default-model")) $("set-default-model").value = s.default_model || "";
   if ($("set-token-maintain")) $("set-token-maintain").checked = s.token_maintain_enabled !== false;
   if ($("set-model-health")) $("set-model-health").checked = s.model_health_enabled !== false;
+  if ($("set-model-health-auto-disable")) {
+    $("set-model-health-auto-disable").checked = s.model_health_auto_disable !== false;
+  }
   if ($("set-affinity")) $("set-affinity").checked = s.conversation_affinity_enabled !== false;
+  if ($("set-token-maintain-interval") && s.token_maintain_interval_sec != null) {
+    $("set-token-maintain-interval").value = s.token_maintain_interval_sec;
+  }
+  if ($("set-token-refresh-skew") && s.token_refresh_skew_sec != null) {
+    $("set-token-refresh-skew").value = s.token_refresh_skew_sec;
+  }
+  if ($("set-model-health-interval") && s.model_health_interval_sec != null) {
+    $("set-model-health-interval").value = s.model_health_interval_sec;
+  }
+  if ($("set-affinity-ttl") && s.conversation_affinity_ttl_sec != null) {
+    $("set-affinity-ttl").value = s.conversation_affinity_ttl_sec;
+  }
+  if ($("set-probe-models")) {
+    const pm = s.probe_models;
+    $("set-probe-models").value = Array.isArray(pm) ? pm.join(", ") : (pm || "");
+  }
   if ($("set-reasoning") && s.reasoning_compat) $("set-reasoning").value = s.reasoning_compat;
   if ($("set-max-tools")) $("set-max-tools").value = (s.outbound_max_tools != null ? s.outbound_max_tools : 1);
+  if ($("set-max-tools-openai")) {
+    $("set-max-tools-openai").value = (s.outbound_max_tools_openai != null ? s.outbound_max_tools_openai : 0);
+  }
   if ($("set-tool-gap")) $("set-tool-gap").value = (s.outbound_tool_gap_sec != null ? s.outbound_tool_gap_sec : 0.08);
   if ($("set-sse-keepalive")) $("set-sse-keepalive").value = (s.sse_keepalive != null ? s.sse_keepalive : 8);
   if ($("set-history-compact")) $("set-history-compact").checked = !!s.history_compact_enabled;
+  if ($("set-history-auto-chars") && s.history_compact_auto_chars != null) {
+    $("set-history-auto-chars").value = s.history_compact_auto_chars;
+  }
+  if ($("set-history-keep-rounds") && s.history_keep_tool_rounds != null) {
+    $("set-history-keep-rounds").value = s.history_keep_tool_rounds;
+  }
+  if ($("set-history-tool-max") && s.history_max_tool_result_chars != null) {
+    $("set-history-tool-max").value = s.history_max_tool_result_chars;
+  }
   const pol = s.pool_policy || s;
   if ($("set-cd-default") && pol.cooldown_default_sec != null) $("set-cd-default").value = pol.cooldown_default_sec;
   if ($("set-cd-auth") && pol.cooldown_auth_sec != null) $("set-cd-auth").value = pol.cooldown_auth_sec;
@@ -5247,6 +5663,8 @@ function fillSystemSettingsForm(s) {
       st === "random" ? "random" : st === "sticky" ? "sticky" : "round_robin";
   }
   try { updateOutboundProxyHint(s); } catch (_) {}
+  // sub2api push config
+  try { fillSub2apiForm(s && s.sub2api_config); } catch (_) {}
   const pill = $("pwd-env-pill");
   if (pill) {
     if (s.admin_password_in_store || (s.has_admin_password && !s.admin_password_from_env)) {
@@ -5292,10 +5710,31 @@ function collectSystemSettingsPatch() {
   if ($("set-default-model")) patch.default_model = ($("set-default-model").value || "").trim();
   if ($("set-token-maintain")) patch.token_maintain_enabled = !!$("set-token-maintain").checked;
   if ($("set-model-health")) patch.model_health_enabled = !!$("set-model-health").checked;
+  if ($("set-model-health-auto-disable")) {
+    patch.model_health_auto_disable = !!$("set-model-health-auto-disable").checked;
+  }
   if ($("set-affinity")) patch.conversation_affinity_enabled = !!$("set-affinity").checked;
+  if ($("set-token-maintain-interval") && $("set-token-maintain-interval").value !== "") {
+    patch.token_maintain_interval_sec = Number($("set-token-maintain-interval").value);
+  }
+  if ($("set-token-refresh-skew") && $("set-token-refresh-skew").value !== "") {
+    patch.token_refresh_skew_sec = Number($("set-token-refresh-skew").value);
+  }
+  if ($("set-model-health-interval") && $("set-model-health-interval").value !== "") {
+    patch.model_health_interval_sec = Number($("set-model-health-interval").value);
+  }
+  if ($("set-affinity-ttl") && $("set-affinity-ttl").value !== "") {
+    patch.conversation_affinity_ttl_sec = Number($("set-affinity-ttl").value);
+  }
+  if ($("set-probe-models")) {
+    patch.probe_models = ($("set-probe-models").value || "").trim();
+  }
   if ($("set-reasoning")) patch.reasoning_compat = $("set-reasoning").value;
   if ($("set-max-tools") && $("set-max-tools").value !== "") {
     patch.outbound_max_tools = Number($("set-max-tools").value);
+  }
+  if ($("set-max-tools-openai") && $("set-max-tools-openai").value !== "") {
+    patch.outbound_max_tools_openai = Number($("set-max-tools-openai").value);
   }
   if ($("set-tool-gap") && $("set-tool-gap").value !== "") {
     patch.outbound_tool_gap_sec = Number($("set-tool-gap").value);
@@ -5304,6 +5743,15 @@ function collectSystemSettingsPatch() {
     patch.sse_keepalive = Number($("set-sse-keepalive").value);
   }
   if ($("set-history-compact")) patch.history_compact_enabled = !!$("set-history-compact").checked;
+  if ($("set-history-auto-chars") && $("set-history-auto-chars").value !== "") {
+    patch.history_compact_auto_chars = Number($("set-history-auto-chars").value);
+  }
+  if ($("set-history-keep-rounds") && $("set-history-keep-rounds").value !== "") {
+    patch.history_keep_tool_rounds = Number($("set-history-keep-rounds").value);
+  }
+  if ($("set-history-tool-max") && $("set-history-tool-max").value !== "") {
+    patch.history_max_tool_result_chars = Number($("set-history-tool-max").value);
+  }
   if ($("set-cd-default") && $("set-cd-default").value !== "") patch.cooldown_default_sec = Number($("set-cd-default").value);
   if ($("set-cd-auth") && $("set-cd-auth").value !== "") patch.cooldown_auth_sec = Number($("set-cd-auth").value);
   if ($("set-cd-429") && $("set-cd-429").value !== "") patch.cooldown_rate_limit_sec = Number($("set-cd-429").value);
@@ -5325,6 +5773,11 @@ function collectSystemSettingsPatch() {
     if (pw) patch.outbound_proxy_password = pw;
   }
   if ($("set-outbound-proxy-strategy")) patch.outbound_proxy_strategy = $("set-outbound-proxy-strategy").value || "round_robin";
+  // sub2api
+  try {
+    const s2 = collectSub2apiPatch();
+    if (s2) patch.sub2api_config = s2;
+  } catch (_) {}
   return patch;
 }
 
@@ -5387,13 +5840,35 @@ async function saveSystemSettings() {
     if (patch.outbound_tool_gap_sec != null && (Number.isNaN(patch.outbound_tool_gap_sec) || patch.outbound_tool_gap_sec < 0)) {
       throw new Error("工具间隔无效");
     }
+    // Persist sub2api via dedicated endpoint FIRST so password is never dropped
+    // by the redacted public settings response from PUT /settings.
+    let s2err = null;
+    try {
+      if ($("set-sub2api-url") || $("set-sub2api-email")) {
+        await saveSub2apiConfig({});
+      }
+    } catch (e) {
+      s2err = e;
+      console.warn("sub2api save failed", e);
+    }
+    // Avoid double-writing / redacting secrets through general settings path.
+    if (patch.sub2api_config) delete patch.sub2api_config;
     const r = await api("/settings", { method: "PUT", body: JSON.stringify(patch) });
     const s = (r && r.settings) || patch;
     if (dashCache) dashCache.settings = Object.assign({}, dashCache.settings || {}, s);
     if (statusCache) statusCache.settings = Object.assign({}, statusCache.settings || {}, s);
     fillSystemSettingsForm(s);
+    // Re-fill sub2api from dedicated GET so has_password/url stay accurate.
+    try {
+      const s2 = await api("/settings/sub2api");
+      if (s2 && s2.config) fillSub2apiForm(s2.config);
+    } catch (_) {}
     try { await refreshOverviewStatus({ force: true, render: true }); } catch (_) {}
-    toast("设置已保存");
+    if (s2err) {
+      toast("其它设置已保存，但 sub2api 配置失败: " + (s2err.message || s2err), true);
+    } else {
+      toast("设置已保存");
+    }
     try { await loadDashboard(); } catch (_) {}
     return s;
   } finally {
@@ -6175,4 +6650,4 @@ window.G2AAdmin = { bootstrap, loadDashboard, api, $, toast, PAGE_META, renderAc
     else bootstrap();
   }
 })();
-/* g2a-cache-bust-20260712-local-solver */
+/* g2a-cache-bust-20260715-reg-restore-fix */

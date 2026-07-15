@@ -82,10 +82,18 @@ def list_accounts() -> list[dict[str, Any]]:
                 "expires_at": exp_f,
                 "expired": expired,
                 "has_refresh_token": bool(entry.get("refresh_token")),
+                "has_sso": bool(
+                    (isinstance(entry.get("sso"), str) and entry.get("sso").strip())
+                    or (
+                        isinstance(entry.get("sso_cookie"), str)
+                        and entry.get("sso_cookie").strip()
+                    )
+                ),
                 "token_hint": _mask_token(token if isinstance(token, str) else None),
                 "first_name": entry.get("first_name"),
                 "last_name": entry.get("last_name"),
                 "principal_type": entry.get("principal_type"),
+                "source": entry.get("source"),
             }
         )
     out.sort(key=lambda a: a.get("expires_at") or 0, reverse=True)
@@ -491,6 +499,14 @@ def _normalize_entry(
         "create_time",
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     )
+    # Normalize SSO aliases into a single durable field on the account payload.
+    sso_val = entry.get("sso") or entry.get("sso_cookie") or entry.get("sso_token")
+    if isinstance(sso_val, str) and sso_val.strip():
+        entry["sso"] = sso_val.strip()
+        entry.setdefault("sso_cookie", entry["sso"])
+    pwd_val = entry.get("password") or entry.get("register_password")
+    if isinstance(pwd_val, str) and pwd_val.strip():
+        entry["password"] = pwd_val.strip()
 
     aid = account_storage_id(
         user_id=str(uid) if uid else None,
@@ -557,12 +573,21 @@ def export_auth_payload(
                     "access_token",
                     "token",
                     "refresh_token",
+                    "sso",
+                    "sso_cookie",
+                    "sso_token",
+                    "password",
+                    "register_password",
                 )
             }
             tok = v.get("key") or v.get("access_token") or v.get("token")
             if isinstance(tok, str):
                 safe["token_hint"] = _mask_token(tok)
             safe["has_refresh_token"] = bool(v.get("refresh_token"))
+            safe["has_sso"] = bool(
+                (isinstance(v.get("sso"), str) and v.get("sso").strip())
+                or (isinstance(v.get("sso_cookie"), str) and v.get("sso_cookie").strip())
+            )
             out[k] = safe
     result = {
         "ok": True,
@@ -673,9 +698,22 @@ def collect_normalized_entries(raw: str | dict[str, Any]) -> dict[str, Any]:
             "last_name",
             "principal_type",
             "oidc_client_id",
+            "oidc_issuer",
+            # Persist registration SSO so it survives process restarts.
+            "sso",
+            "sso_cookie",
+            "password",
+            "register_password",
+            "source",
+            "registration_session_id",
+            "registration_batch_id",
         ):
-            if parsed.get(field) is not None:
+            if parsed.get(field) is not None and parsed.get(field) != "":
                 entry[field] = parsed[field]
+        if not entry.get("sso") and entry.get("sso_cookie"):
+            entry["sso"] = entry.get("sso_cookie")
+        if not entry.get("password") and entry.get("register_password"):
+            entry["password"] = entry.get("register_password")
         raw_entries.append((str(account_id) if account_id else None, entry))
 
     if not raw_entries:
@@ -915,9 +953,22 @@ def import_auth_payload(
             "last_name",
             "principal_type",
             "oidc_client_id",
+            "oidc_issuer",
+            # Persist registration SSO so it survives process restarts.
+            "sso",
+            "sso_cookie",
+            "password",
+            "register_password",
+            "source",
+            "registration_session_id",
+            "registration_batch_id",
         ):
-            if parsed.get(field) is not None:
+            if parsed.get(field) is not None and parsed.get(field) != "":
                 entry[field] = parsed[field]
+        if not entry.get("sso") and entry.get("sso_cookie"):
+            entry["sso"] = entry.get("sso_cookie")
+        if not entry.get("password") and entry.get("register_password"):
+            entry["password"] = entry.get("register_password")
         raw_entries.append((str(account_id) if account_id else None, entry))
 
     if not raw_entries:

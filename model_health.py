@@ -153,9 +153,31 @@ def invalidate_probe_http_client() -> None:
             pass
 
 
+def _live_probe_models() -> list[str]:
+    """Runtime probe model list (settings DB overrides env/config)."""
+    try:
+        from settings_store import get_probe_models
+
+        models = get_probe_models()
+        if models:
+            return list(models)
+    except Exception:
+        pass
+    return list(PROBE_MODELS) or [DEFAULT_MODEL]
+
+
+def _live_auto_disable() -> bool:
+    try:
+        from settings_store import get_model_health_auto_disable
+
+        return bool(get_model_health_auto_disable())
+    except Exception:
+        return bool(MODEL_HEALTH_AUTO_DISABLE)
+
+
 def _normalize_probe_models(models: list[str] | None = None) -> list[str]:
     """De-dupe + stabilize probe model list (preserve order)."""
-    raw = models if models is not None else (list(PROBE_MODELS) or [DEFAULT_MODEL])
+    raw = models if models is not None else _live_probe_models()
     seen: set[str] = set()
     out: list[str] = []
     for m in raw:
@@ -336,7 +358,7 @@ def handle_upstream_error_for_model(
     Temporary free-usage / 429s only get a short model soft-block TTL so
     rotation skips the hot account briefly without killing the pool.
     """
-    if not account_id or not MODEL_HEALTH_AUTO_DISABLE:
+    if not account_id or not _live_auto_disable():
         return None
 
     import account_pool
@@ -508,7 +530,7 @@ def probe_model_for_creds(
     last_probe is always written for the scanned account.
     """
     if auto_disable is None:
-        auto_disable = MODEL_HEALTH_AUTO_DISABLE
+        auto_disable = _live_auto_disable()
 
     t0 = time.time()
     base: dict[str, Any] = {
@@ -736,7 +758,8 @@ def probe_single_account(
     source: str = "manual",
 ) -> dict[str, Any]:
     """Probe one account with one model (default DEFAULT / PROBE_MODELS[0])."""
-    model = (model or (PROBE_MODELS[0] if PROBE_MODELS else DEFAULT_MODEL)).strip()
+    defaults = _live_probe_models()
+    model = (model or (defaults[0] if defaults else DEFAULT_MODEL)).strip()
     creds = load_credentials_by_id(account_id)
     result = probe_model_for_creds(
         creds, model, auto_disable=auto_disable, source=source
@@ -1558,6 +1581,12 @@ def probe_all_accounts_concurrent(
 
 def _interval() -> float:
     try:
+        from settings_store import get_model_health_interval_sec
+
+        return max(0.0, float(get_model_health_interval_sec()))
+    except Exception:
+        pass
+    try:
         # 0 = disabled (on-demand only)
         v = float(os.getenv("GROK2API_MODEL_HEALTH_INTERVAL", str(MODEL_HEALTH_INTERVAL)))
         return max(0.0, v)
@@ -1628,8 +1657,8 @@ def run_once(*, source: str = "background") -> dict[str, Any]:
                 cycle_budget = 150.0
         result = probe_account_models(
             None,
-            list(PROBE_MODELS) or [DEFAULT_MODEL],
-            auto_disable=True,
+            _live_probe_models(),
+            auto_disable=_live_auto_disable(),
             source=source,
             max_workers=workers,
             cycle_budget_sec=cycle_budget,
@@ -1950,11 +1979,11 @@ def status(*, light: bool = False) -> dict[str, Any]:
         "startup_delay_sec": _startup_delay(),
         "probe_workers": MODEL_PROBE_WORKERS,
         "probe_batch": MODEL_PROBE_BATCH,
-        "probe_models": list(PROBE_MODELS) or [DEFAULT_MODEL],
+        "probe_models": _live_probe_models(),
         # Background rotates 1 model/cycle; manual probes cap models/account.
         "probe_models_per_cycle": 1,
         "probe_max_models_per_account": int(MODEL_PROBE_MAX_MODELS_PER_ACCOUNT or 2),
-        "auto_disable": MODEL_HEALTH_AUTO_DISABLE,
+        "auto_disable": _live_auto_disable(),
         "sweep": sweep,
         "full_pool_eta_sec": eta_sec,
         "selection": "priority_sweep",

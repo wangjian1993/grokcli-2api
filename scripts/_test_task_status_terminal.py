@@ -338,10 +338,12 @@ def test_update_file_path_beats_path_alias():
     )
     assert n2["file_path"] == "/correct", n2
 
-    # 3) Stream merge: correct file_path first, later complete rewrite with path alias
+    # 3) Stream merge: incomplete path-only first, later complete rewrite wins
+    #    (including path under alias). Early path-only previews are often wrong
+    #    and must not stick over a later complete Update/Edit payload.
     merged = anth.merge_tool_argument_delta(
-        '{"file_path":"/correct"}',
-        '{"path":"/wrong","old_string":"a","new_string":"b"}',
+        '{"file_path":"/stale-preview"}',
+        '{"path":"/correct","old_string":"a","new_string":"b"}',
         tool_name="Update",
     )
     obj = json.loads(merged)
@@ -349,6 +351,17 @@ def test_update_file_path_beats_path_alias():
     assert obj.get("old_string") == "a", merged
     assert obj.get("new_string") == "b", merged
     assert "path" not in obj, merged
+
+    # 3b) Complete early payload must not be clobbered by later incomplete path
+    merged_keep = anth.merge_tool_argument_delta(
+        '{"file_path":"/correct","old_string":"a","new_string":"b"}',
+        '{"path":"/wrong"}',
+        tool_name="Update",
+    )
+    obj_keep = json.loads(merged_keep)
+    assert obj_keep.get("file_path") == "/correct", merged_keep
+    assert obj_keep.get("old_string") == "a", merged_keep
+    assert obj_keep.get("new_string") == "b", merged_keep
 
     # 4) Stream merge opposite order: path first, then correct file_path rewrite
     merged2 = anth.merge_tool_argument_delta(
@@ -361,10 +374,40 @@ def test_update_file_path_beats_path_alias():
 
     # 5) Doubled blob in one chunk
     san = anth.sanitize_tool_arguments_json(
-        '{"path":"/wrong"}{"file_path":"/correct","old_string":"a","new_string":"b"}'
+        '{"path":"/wrong"}{"file_path":"/correct","old_string":"a","new_string":"b"}',
+        tool_name="Update",
     )
     san_obj = json.loads(anth.normalize_tool_arguments_json(san, tool_name="Update"))
     assert san_obj.get("file_path") == "/correct", san_obj
+
+    # 5b) Intermittent failure: early wrong file_path + later complete rewrite via path
+    #     (the previous merge kept the first file_path forever).
+    san_flip = anth.sanitize_tool_arguments_json(
+        '{"file_path":"/wrong"}{"path":"/correct","old_string":"a","new_string":"b"}',
+        tool_name="Update",
+    )
+    san_flip_obj = json.loads(
+        anth.normalize_tool_arguments_json(san_flip, tool_name="Update")
+    )
+    assert san_flip_obj.get("file_path") == "/correct", san_flip_obj
+    assert san_flip_obj.get("old_string") == "a", san_flip_obj
+
+    # 5c) Stream merge: partial wrong path then complete rewrite under alias.
+    m_flip = anth.merge_tool_argument_delta(
+        '{"file_path":"/wrong"}',
+        '{"path":"/correct","old_string":"old","new_string":"new"}',
+        tool_name="Update",
+    )
+    m_flip_obj = json.loads(m_flip)
+    assert m_flip_obj.get("file_path") == "/correct", m_flip_obj
+    assert m_flip_obj.get("old_string") == "old", m_flip_obj
+
+    # 5d) target_file alias (Cursor / Codex style)
+    n_tf = anth.normalize_tool_argument_keys(
+        {"target_file": "/via-target", "old_string": "a", "new_string": "b"}
+    )
+    assert n_tf.get("file_path") == "/via-target", n_tf
+    assert "target_file" not in n_tf, n_tf
 
     # 6) Empty canonical should not block a non-empty alias
     n3 = anth.normalize_tool_argument_keys({"file_path": "", "path": "/only-alias"})
@@ -376,6 +419,16 @@ def test_update_file_path_beats_path_alias():
         {"path": "/wrong", "file_path": "/correct"}
     )
     assert ln.get("file_path") == "/correct", ln
+
+    # 7b) local doubled blob flip (wrong early file_path, later complete path)
+    san_local = oresp._local_sanitize_tool_arguments_json(
+        '{"file_path":"/wrong"}{"path":"/correct","old_string":"a","new_string":"b"}',
+        tool_name="Update",
+    )
+    san_local_obj = json.loads(
+        oresp._local_normalize_tool_arguments_json(san_local, tool_name="Update")
+    )
+    assert san_local_obj.get("file_path") == "/correct", san_local_obj
 
     print("test_update_file_path_beats_path_alias OK")
 

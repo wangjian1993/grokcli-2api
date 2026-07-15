@@ -64,14 +64,26 @@ _LOCAL_TOOL_ARG_KEY_ALIASES: dict[str, str] = {
     "filepath": "file_path",
     "file": "file_path",
     "filename": "file_path",
+    # Cursor / Codex / some Grok variants
+    "target_file": "file_path",
+    "targetfile": "file_path",
+    "targetpath": "file_path",
+    "target_path": "file_path",
+    "file_name": "file_path",
     "oldstring": "old_string",
     "oldstr": "old_string",
     "oldtext": "old_string",
     "old": "old_string",
+    "old_text": "old_string",
+    "original": "old_string",
+    "original_text": "old_string",
     "newstring": "new_string",
     "newstr": "new_string",
     "newtext": "new_string",
     "new": "new_string",
+    "new_text": "new_string",
+    "replacement": "new_string",
+    "replace_with": "new_string",
     "notebookpath": "notebook_path",
     "notebook": "notebook_path",
     "cmd": "command",
@@ -186,13 +198,97 @@ def _local_tool_arg_value_score(value: Any) -> tuple[int, int, int, int]:
     return (1, 1 if text.strip() else 0, 0, len(text))
 
 
-def _local_merge_tool_arg_dicts(values: list[Any]) -> dict[str, Any] | None:
+def _local_merge_tool_arg_dicts(
+    values: list[Any],
+    *,
+    tool_name: str | None = None,
+) -> dict[str, Any] | None:
     dicts = [v for v in values if isinstance(v, dict)]
     if not dicts:
         return None
+
+    def _obj_complete(d: dict[str, Any]) -> bool:
+        try:
+            text = json.dumps(
+                _local_normalize_tool_arg_keys(d),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return _local_tool_args_ready(text, tool_name=tool_name)
+        except (TypeError, ValueError):
+            return False
+
+    # Later complete rewrite wins over earlier incomplete partials — fixes the
+    # intermittent Update path where a wrong early file_path sticks forever.
+    base_idx = 0
+    last_complete = -1
+    for i, d in enumerate(dicts):
+        if _obj_complete(d):
+            last_complete = i
+    if last_complete > 0 and not _obj_complete(dicts[0]):
+        base_idx = last_complete
+
+    if base_idx > 0:
+        # Later complete rewrite is the base. Earlier incomplete path-only
+        # previews must not pin a wrong file_path over the complete payload.
+        base = dict(dicts[base_idx])
+        base_canons = {_local_canonical_tool_arg_key(str(k)) for k in base.keys()}
+        for i, d in enumerate(dicts):
+            if i == base_idx:
+                continue
+            for k, v in d.items():
+                canon = _local_canonical_tool_arg_key(str(k))
+                if i < base_idx and canon in base_canons:
+                    continue
+                if k not in base:
+                    base[k] = v
+                    base_canons.add(canon)
+                    continue
+                old = base.get(k)
+                if old in (None, "", [], {}):
+                    base[k] = v
+                elif isinstance(v, str) and not v.strip():
+                    if i > base_idx:
+                        base[k] = v
+                elif isinstance(old, dict) and isinstance(v, dict):
+                    tmp = dict(old)
+                    tmp.update(v)
+                    base[k] = tmp
+                elif isinstance(old, list) and isinstance(v, list) and len(v) >= len(old):
+                    base[k] = v
+                elif i > base_idx and v not in (None, "", [], {}):
+                    base[k] = v
+        return _local_normalize_tool_arg_keys(base)
+
+    # No complete-later base: merge in order. If an earlier complete object is
+    # followed by incomplete fragments, do not let incomplete path aliases
+    # overwrite fields already set by the complete object.
+    first_complete = -1
+    for i, d in enumerate(dicts):
+        if _obj_complete(d):
+            first_complete = i
+            break
+
     merged: dict[str, Any] = {}
-    for d in dicts:
+    complete_canons: set[str] = set()
+    for i, d in enumerate(dicts):
+        is_complete = _obj_complete(d)
+        if is_complete:
+            complete_canons = {
+                _local_canonical_tool_arg_key(str(k)) for k in d.keys()
+            } | {
+                _local_canonical_tool_arg_key(str(k)) for k in merged.keys()
+            }
         for k, v in d.items():
+            canon = _local_canonical_tool_arg_key(str(k))
+            if (
+                first_complete >= 0
+                and i > first_complete
+                and not is_complete
+                and canon in complete_canons
+            ):
+                # Incomplete later fragment must not clobber complete fields.
+                continue
             if k not in merged:
                 merged[k] = v
                 continue
@@ -210,10 +306,12 @@ def _local_merge_tool_arg_dicts(values: list[Any]) -> dict[str, Any] | None:
                 merged[k] = v
             elif v not in (None, "", [], {}):
                 merged[k] = v
-    return merged
+    return _local_normalize_tool_arg_keys(merged)
 
 
-def _local_sanitize_tool_arguments_json(raw: Any) -> str:
+def _local_sanitize_tool_arguments_json(
+    raw: Any, *, tool_name: str | None = None
+) -> str:
     """Import-safe mirror of anthropic_compat.sanitize_tool_arguments_json."""
     if raw is None:
         return ""
@@ -266,7 +364,7 @@ def _local_sanitize_tool_arguments_json(raw: Any) -> str:
     first_text = src[: ends[0]].strip()
     if all(v == first for v in values[1:]):
         return first_text
-    merged = _local_merge_tool_arg_dicts(values)
+    merged = _local_merge_tool_arg_dicts(values, tool_name=tool_name)
     candidates: list[tuple[tuple[int, int, int, int], str]] = []
     if merged is not None:
         try:
@@ -297,7 +395,7 @@ def _local_sanitize_tool_arguments_json(raw: Any) -> str:
 def _local_normalize_tool_arguments_json(
     raw: Any, *, tool_name: str | None = None
 ) -> str:
-    cleaned = _local_sanitize_tool_arguments_json(raw)
+    cleaned = _local_sanitize_tool_arguments_json(raw, tool_name=tool_name)
     if not cleaned or not str(cleaned).strip():
         return cleaned
     text = str(cleaned).strip()

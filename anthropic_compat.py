@@ -576,7 +576,11 @@ def _tool_arg_value_score(value: Any) -> tuple[int, int, int, int]:
     return (1, 1 if text.strip() else 0, 0, len(text))
 
 
-def _merge_tool_arg_dicts(values: list[Any]) -> dict[str, Any] | None:
+def _merge_tool_arg_dicts(
+    values: list[Any],
+    *,
+    tool_name: str | None = None,
+) -> dict[str, Any] | None:
     """Deep-ish merge of successive dict rewrites (later values win).
 
     Explicit later empty string (Edit/Update new_string="") must overwrite an
@@ -587,10 +591,73 @@ def _merge_tool_arg_dicts(values: list[Any]) -> dict[str, Any] | None:
     ``normalize_tool_argument_keys`` can prefer an already-canonical key
     (``file_path``) over a conflicting alias (``path``) after the fact —
     critical for Claude Code → sub2api → grokcli-2api Update/Edit streams.
+
+    Intermittent Update failure: if an earlier partial only had a wrong
+    ``file_path`` and a later complete rewrite supplies the real path under
+    any alias (``path`` / ``target_file`` / ``file_path``), the later complete
+    object is the merge base so the early wrong path cannot stick.
     """
     dicts = [v for v in values if isinstance(v, dict)]
     if not dicts:
         return None
+
+    def _obj_complete(d: dict[str, Any]) -> bool:
+        try:
+            return is_complete_tool_arguments_json(
+                json.dumps(
+                    normalize_tool_argument_keys(d),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                tool_name=tool_name,
+            )
+        except (TypeError, ValueError):
+            return False
+
+    # Prefer the last complete object as the merge base when earlier ones are
+    # incomplete partials (the intermittent "wrong file_path sticks" path).
+    base_idx = 0
+    if tool_name is not None or any(_obj_complete(d) for d in dicts):
+        last_complete = -1
+        for i, d in enumerate(dicts):
+            if _obj_complete(d):
+                last_complete = i
+        if last_complete > 0 and not _obj_complete(dicts[0]):
+            base_idx = last_complete
+
+    if base_idx > 0:
+        # Start from the complete rewrite; fold non-conflicting keys from
+        # earlier partials (e.g. replace_all) and later extras.
+        base = dict(dicts[base_idx])
+        base_canons = {_canonical_tool_arg_key(str(k)) for k in base.keys()}
+        for i, d in enumerate(dicts):
+            if i == base_idx:
+                continue
+            for k, v in d.items():
+                canon = _canonical_tool_arg_key(str(k))
+                if i < base_idx and canon in base_canons:
+                    # Earlier partial must not override fields the complete rewrite set.
+                    continue
+                if k not in base:
+                    base[k] = v
+                    base_canons.add(canon)
+                    continue
+                old = base.get(k)
+                if old in (None, "", [], {}):
+                    base[k] = v
+                elif isinstance(v, str) and not v.strip():
+                    if i > base_idx:
+                        base[k] = v
+                elif isinstance(old, dict) and isinstance(v, dict):
+                    tmp = dict(old)
+                    tmp.update(v)
+                    base[k] = tmp
+                elif isinstance(old, list) and isinstance(v, list) and len(v) >= len(old):
+                    base[k] = v
+                elif i > base_idx and v not in (None, "", [], {}):
+                    base[k] = v
+        return normalize_tool_argument_keys(base)
+
     merged: dict[str, Any] = {}
     for d in dicts:
         for k, v in d.items():
@@ -620,7 +687,11 @@ def _merge_tool_arg_dicts(values: list[Any]) -> dict[str, Any] | None:
     return normalize_tool_argument_keys(merged)
 
 
-def sanitize_tool_arguments_json(raw: Any) -> str:
+def sanitize_tool_arguments_json(
+    raw: Any,
+    *,
+    tool_name: str | None = None,
+) -> str:
     """
     Normalize tool argument text and recover doubled JSON blobs.
 
@@ -694,7 +765,8 @@ def sanitize_tool_arguments_json(raw: Any) -> str:
 
     # Prefer a deep-merge of successive dict rewrites when that yields a richer
     # payload (Update: partial file_path object + full edit object in one chunk).
-    merged = _merge_tool_arg_dicts(values)
+    # Pass tool_name so incomplete early objects cannot pin a wrong file_path.
+    merged = _merge_tool_arg_dicts(values, tool_name=tool_name)
     candidates: list[tuple[tuple[int, int, int, int], str]] = []
     if merged is not None:
         try:
@@ -781,14 +853,26 @@ _TOOL_ARG_KEY_ALIASES: dict[str, str] = {
     "filepath": "file_path",
     "file": "file_path",
     "filename": "file_path",
+    # Cursor / Codex / some Grok variants
+    "target_file": "file_path",
+    "targetfile": "file_path",
+    "targetpath": "file_path",
+    "target_path": "file_path",
+    "file_name": "file_path",
     "oldstring": "old_string",
     "oldstr": "old_string",
     "oldtext": "old_string",
     "old": "old_string",
+    "old_text": "old_string",
+    "original": "old_string",
+    "original_text": "old_string",
     "newstring": "new_string",
     "newstr": "new_string",
     "newtext": "new_string",
     "new": "new_string",
+    "new_text": "new_string",
+    "replacement": "new_string",
+    "replace_with": "new_string",
     # Write: models often invent "contents" while Claude Code requires "content".
     "contents": "content",
     "filecontent": "content",
@@ -1010,7 +1094,7 @@ def normalize_tool_arguments_json(
     raw: Any, *, tool_name: str | None = None
 ) -> str:
     """Sanitize + alias-normalize tool arguments JSON for readiness/emission."""
-    cleaned = sanitize_tool_arguments_json(raw)
+    cleaned = sanitize_tool_arguments_json(raw, tool_name=tool_name)
     if not cleaned or not str(cleaned).strip():
         return cleaned
     text = str(cleaned).strip()
@@ -1555,8 +1639,10 @@ def merge_tool_argument_delta(
     # Sanitize doubled blobs first. Alias-normalize only for readiness checks
     # and final return — structural merge uses raw keys so path/file_path can
     # coexist until preference is applied.
-    cur_raw = sanitize_tool_arguments_json(current) if current else ""
-    piece_raw = sanitize_tool_arguments_json(incoming) if incoming else ""
+    cur_raw = sanitize_tool_arguments_json(current, tool_name=tool_name) if current else ""
+    piece_raw = (
+        sanitize_tool_arguments_json(incoming, tool_name=tool_name) if incoming else ""
+    )
     cur = (
         normalize_tool_arguments_json(cur_raw, tool_name=tool_name) if cur_raw else ""
     )
@@ -1616,30 +1702,84 @@ def merge_tool_argument_delta(
             )
         if isinstance(a, dict) and isinstance(b, dict):
             # Field growth / partial rewrite: merge keys on RAW aliases first.
-            # Example: {"file_path":"/correct"} + {"path":"/wrong","old_string":...}
-            # must keep file_path=/correct after normalize, not /wrong.
-            # Explicit later empty string is kept (Edit/Update new_string="" delete).
-            merged = dict(a)
-            for k, v in b.items():
-                if k not in merged:
-                    merged[k] = v
-                    continue
-                old = merged.get(k)
-                if old in (None, "", [], {}):
-                    merged[k] = v
-                elif isinstance(v, str) and not v.strip():
-                    merged[k] = v
-                elif isinstance(old, dict) and isinstance(v, dict):
-                    tmp = dict(old)
-                    tmp.update(v)
-                    merged[k] = tmp
-                elif isinstance(old, list) and isinstance(v, list) and len(v) >= len(old):
-                    merged[k] = v
-                else:
-                    # Prefer later value when both set (correction / expansion)
-                    # for the *same raw key*. Cross-alias conflicts are resolved
-                    # by normalize_tool_argument_keys (canonical beats alias).
-                    merged[k] = v
+            #
+            # Intermittent Update failure (Claude Code → sub2api):
+            #   cur   = {"file_path":"/wrong"}          # incomplete preview
+            #   piece = {"path":"/correct","old_string":..,"new_string":..}
+            # If we keep early file_path forever, Edit opens the wrong file and
+            # "Error editing file" looks random. When the *later* object alone is
+            # a complete tool payload and the earlier is not, later wins as base.
+            # Same-key later values still overwrite; cross-alias preference only
+            # applies when both sides are complete (or neither is).
+            a_norm = normalize_tool_argument_keys(a)
+            b_norm = normalize_tool_argument_keys(b)
+            try:
+                a_complete_obj = is_complete_tool_arguments_json(
+                    json.dumps(a_norm, ensure_ascii=False, separators=(",", ":")),
+                    tool_name=tool_name,
+                )
+            except (TypeError, ValueError):
+                a_complete_obj = False
+            try:
+                b_complete_obj = is_complete_tool_arguments_json(
+                    json.dumps(b_norm, ensure_ascii=False, separators=(",", ":")),
+                    tool_name=tool_name,
+                )
+            except (TypeError, ValueError):
+                b_complete_obj = False
+
+            if b_complete_obj and not a_complete_obj:
+                # Later complete rewrite is authoritative — including path under
+                # any alias. Early incomplete path-only previews are often wrong
+                # (intermittent "Error editing file" when a bad file_path sticks).
+                # Keep only non-conflicting extras from the early partial
+                # (e.g. replace_all) that the complete rewrite did not set.
+                merged = dict(b)
+                b_canons = {
+                    _canonical_tool_arg_key(str(k)) for k in b.keys()
+                }
+                for k, v in a.items():
+                    canon = _canonical_tool_arg_key(str(k))
+                    if canon in b_canons:
+                        continue
+                    if k not in merged:
+                        merged[k] = v
+            elif a_complete_obj and not b_complete_obj:
+                # Later fragment is incomplete — keep complete early payload.
+                merged = dict(a)
+                a_canons = {
+                    _canonical_tool_arg_key(str(k)) for k in a.keys()
+                }
+                for k, v in b.items():
+                    canon = _canonical_tool_arg_key(str(k))
+                    if canon in a_canons:
+                        # Do not let incomplete later path alias clobber a
+                        # complete early file_path/old_string/new_string set.
+                        continue
+                    if k not in merged:
+                        merged[k] = v
+            else:
+                # Both complete or both incomplete: merge keys, later same-key
+                # wins; cross-alias conflicts resolved by normalize (canonical
+                # beats alias when both non-empty).
+                merged = dict(a)
+                for k, v in b.items():
+                    if k not in merged:
+                        merged[k] = v
+                        continue
+                    old = merged.get(k)
+                    if old in (None, "", [], {}):
+                        merged[k] = v
+                    elif isinstance(v, str) and not v.strip():
+                        merged[k] = v
+                    elif isinstance(old, dict) and isinstance(v, dict):
+                        tmp = dict(old)
+                        tmp.update(v)
+                        merged[k] = tmp
+                    elif isinstance(old, list) and isinstance(v, list) and len(v) >= len(old):
+                        merged[k] = v
+                    else:
+                        merged[k] = v
             try:
                 merged_text = json.dumps(
                     merged, ensure_ascii=False, separators=(",", ":")

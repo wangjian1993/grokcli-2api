@@ -64,6 +64,18 @@ def _enabled() -> bool:
 
 def _ttl() -> float:
     try:
+        from settings_store import get_conversation_affinity_ttl_sec
+
+        return max(60.0, float(get_conversation_affinity_ttl_sec()))
+    except Exception:
+        pass
+    try:
+        from config import AFFINITY_TTL
+
+        return max(60.0, float(AFFINITY_TTL or 7200.0))
+    except Exception:
+        pass
+    try:
         return max(60.0, float(os.getenv("GROK2API_AFFINITY_TTL", "7200")))
     except ValueError:
         return 7200.0

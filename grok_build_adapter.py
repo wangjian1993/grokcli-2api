@@ -28,7 +28,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 GBA = ROOT / "grok-build-auth"
-ADAPTER_BUILD = "v1.9.80-reg-sso-sticky-runner-fix"
+DATA_DIR = ROOT / "data"
+REGISTER_SSO_DIR = DATA_DIR / "register_sso"
+ADAPTER_BUILD = "v1.9.81-reg-sso-account-persist"
 # Newly registered accounts often need a short settle window before probe.
 REGISTER_PROBE_DELAY_SEC = float(
     os.environ.get("GROK2API_REG_PROBE_DELAY_SEC", "30") or 30
@@ -190,6 +192,52 @@ except (TypeError, ValueError):
 
 def _now() -> float:
     return time.time()
+
+
+def _persist_registration_sso(
+    *,
+    sid: str,
+    email: str = "",
+    password: str = "",
+    sso: str = "",
+    batch_id: str | None = None,
+) -> str:
+    """Write one durable SSO backup file under data/register_sso/.
+
+    Registration sessions are in-memory/Redis-TTL; account auth payload is the
+    primary store. This file is a secondary backup for operators who want raw
+    SSO cookies without querying the account store.
+    """
+    cookie = str(sso or "").strip()
+    if not cookie:
+        return ""
+    try:
+        REGISTER_SSO_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    safe_email = "".join(
+        ch if ch.isalnum() or ch in "._@+-" else "_"
+        for ch in str(email or "unknown")
+    )[:80]
+    safe_sid = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(sid or "x"))[:24]
+    path = REGISTER_SSO_DIR / f"{ts}_{safe_email}_{safe_sid}.json"
+    payload = {
+        "session_id": sid,
+        "batch_id": batch_id,
+        "email": email,
+        "password": password,
+        "sso": cookie,
+        "sso_cookie": cookie,
+        "created_at": ts,
+        "source": "register-email",
+    }
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+    except Exception as e:  # noqa: BLE001
+        print(f"[grok-build-auth] WARN: write SSO backup failed: {e}")
+        return ""
 
 
 def _reg_redis() -> bool:
@@ -2919,18 +2967,44 @@ def _run_registration(
                 f"adapter_build={ADAPTER_BUILD}; sso_prefix={sso[:24]!r}"
             )
         _key, entry = sso_import.token_to_auth_entry(token, email=email)
-        import_result = accounts.import_auth_payload(
-            {
-                "key": entry["key"],
-                "auth_mode": entry.get("auth_mode", "oidc"),
-                "email": entry.get("email") or email,
-                "refresh_token": entry.get("refresh_token", ""),
-                "expires_at": entry.get("expires_at"),
-                "oidc_issuer": entry.get("oidc_issuer", "https://auth.x.ai"),
-                "oidc_client_id": entry.get("oidc_client_id", ""),
-            },
-            merge=True,
-        )
+        # Keep the raw SSO cookie with the account so export/re-import works
+        # after process restart (registration sessions are ephemeral).
+        sso_cookie = str(sso or sess.get("sso") or "").strip()
+        reg_password = str(password or sess.get("password") or "").strip()
+        sso_backup_path = ""
+        if sso_cookie:
+            try:
+                sso_backup_path = _persist_registration_sso(
+                    sid=sid,
+                    email=str(entry.get("email") or email or ""),
+                    password=reg_password,
+                    sso=sso_cookie,
+                    batch_id=str(sess.get("batch_id") or "") or None,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[grok-build-auth] WARN: persist SSO backup failed: {e}")
+        import_payload: dict[str, Any] = {
+            "key": entry["key"],
+            "auth_mode": entry.get("auth_mode", "oidc"),
+            "email": entry.get("email") or email,
+            "refresh_token": entry.get("refresh_token", ""),
+            "expires_at": entry.get("expires_at"),
+            "oidc_issuer": entry.get("oidc_issuer", "https://auth.x.ai"),
+            "oidc_client_id": entry.get("oidc_client_id", ""),
+            "source": "register-email",
+            "registration_session_id": sid,
+        }
+        if sess.get("batch_id"):
+            import_payload["registration_batch_id"] = sess.get("batch_id")
+        if sso_cookie:
+            import_payload["sso"] = sso_cookie
+            import_payload["sso_cookie"] = sso_cookie
+        if reg_password:
+            import_payload["password"] = reg_password
+            import_payload["register_password"] = reg_password
+        if sso_backup_path:
+            import_payload["sso_backup_path"] = sso_backup_path
+        import_result = accounts.import_auth_payload(import_payload, merge=True)
         if not import_result.get("ok"):
             raise RuntimeError(
                 f"SSO account import failed: {import_result.get('error')}; "

@@ -334,10 +334,18 @@ def list_account_summaries(
                 "expires_at": exp,
                 "expired": expired,
                 "has_refresh_token": bool(payload.get("refresh_token")),
+                "has_sso": bool(
+                    (isinstance(payload.get("sso"), str) and payload.get("sso").strip())
+                    or (
+                        isinstance(payload.get("sso_cookie"), str)
+                        and payload.get("sso_cookie").strip()
+                    )
+                ),
                 "token_hint": hint,
                 "first_name": payload.get("first_name"),
                 "last_name": payload.get("last_name"),
                 "principal_type": payload.get("principal_type"),
+                "source": payload.get("source"),
             }
         )
 

@@ -67,10 +67,22 @@ _PG_SCALAR_KEYS = (
     "model_health_enabled",
     "reasoning_compat",
     "outbound_max_tools",
+    "outbound_max_tools_openai",
     "outbound_tool_gap_sec",
     "history_compact_enabled",
+    "history_compact_auto_chars",
+    "history_keep_tool_rounds",
+    "history_keep_recent_turns",  # legacy alias key
+    "history_max_tool_result_chars",
+    "history_tool_result_max_chars",  # legacy alias key
     "sse_keepalive",
     "conversation_affinity_enabled",
+    "conversation_affinity_ttl_sec",
+    "token_maintain_interval_sec",
+    "token_refresh_skew_sec",
+    "model_health_interval_sec",
+    "model_health_auto_disable",
+    "probe_models",
     "default_model",
     "cooldown_default_sec",
     "cooldown_auth_sec",
@@ -87,6 +99,8 @@ _PG_SCALAR_KEYS = (
     "registration_config",
     # Outbound proxy pool for account-pool traffic (chat / probe / refresh)
     "outbound_proxy_config",
+    # sub2api push (URL / login / default group)
+    "sub2api_config",
 )
 
 
@@ -1166,6 +1180,39 @@ def set_outbound_max_tools(value: int | str) -> int:
     return v
 
 
+def get_outbound_max_tools_openai() -> int:
+    """Per-turn tool cap for OpenAI chat/completions (0 = unlimited)."""
+    raw = _get_setting_value("outbound_max_tools_openai", None)
+    if raw is None:
+        try:
+            import history_compact as hc
+
+            return int(getattr(hc, "OUTBOUND_MAX_TOOLS_OPENAI", 0) or 0)
+        except Exception:
+            return 0
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 0
+    return max(0, min(64, v))
+
+
+def set_outbound_max_tools_openai(value: int | str) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("outbound_max_tools_openai 必须是整数 0–64") from e
+    v = max(0, min(64, v))
+    _set_setting_value("outbound_max_tools_openai", v)
+    try:
+        import history_compact as hc
+
+        hc.OUTBOUND_MAX_TOOLS_OPENAI = v
+    except Exception:
+        pass
+    return v
+
+
 def get_outbound_tool_gap_sec() -> float:
     raw = _get_setting_value("outbound_tool_gap_sec", None)
     if raw is None:
@@ -1220,6 +1267,131 @@ def set_history_compact_enabled(enabled: bool) -> bool:
     except Exception:
         pass
     return val
+
+
+def get_history_compact_auto_chars() -> int:
+    """0 disables auto threshold; otherwise chars of messages JSON that trigger compact."""
+    raw = _get_setting_value("history_compact_auto_chars", None)
+    if raw is None:
+        try:
+            import history_compact as hc
+
+            return int(getattr(hc, "HISTORY_COMPACT_AUTO_CHARS", 180_000) or 0)
+        except Exception:
+            return 180_000
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 180_000
+    # 0 = off; otherwise clamp to a sane band
+    if v <= 0:
+        return 0
+    return max(4_000, min(5_000_000, v))
+
+
+def set_history_compact_auto_chars(value: int | str) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("history_compact_auto_chars 必须是整数 0 或 4000–5000000") from e
+    if v <= 0:
+        v = 0
+    else:
+        v = max(4_000, min(5_000_000, v))
+    _set_setting_value("history_compact_auto_chars", v)
+    try:
+        import history_compact as hc
+
+        hc.HISTORY_COMPACT_AUTO_CHARS = v
+    except Exception:
+        pass
+    return v
+
+
+def get_history_keep_tool_rounds() -> int:
+    raw = _get_setting_value("history_keep_tool_rounds", None)
+    if raw is None:
+        # Accept legacy key from earlier UI draft
+        raw = _get_setting_value("history_keep_recent_turns", None)
+    if raw is None:
+        try:
+            import history_compact as hc
+
+            return int(getattr(hc, "HISTORY_KEEP_TOOL_ROUNDS", 6) or 6)
+        except Exception:
+            return 6
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 6
+    return max(1, min(64, v))
+
+
+def set_history_keep_tool_rounds(value: int | str) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("history_keep_tool_rounds 必须是整数 1–64") from e
+    v = max(1, min(64, v))
+    _set_setting_value("history_keep_tool_rounds", v)
+    try:
+        import history_compact as hc
+
+        hc.HISTORY_KEEP_TOOL_ROUNDS = v
+    except Exception:
+        pass
+    return v
+
+
+# Back-compat aliases (older draft names)
+def get_history_keep_recent_turns() -> int:
+    return get_history_keep_tool_rounds()
+
+
+def set_history_keep_recent_turns(value: int | str) -> int:
+    return set_history_keep_tool_rounds(value)
+
+
+def get_history_max_tool_result_chars() -> int:
+    raw = _get_setting_value("history_max_tool_result_chars", None)
+    if raw is None:
+        raw = _get_setting_value("history_tool_result_max_chars", None)
+    if raw is None:
+        try:
+            import history_compact as hc
+
+            return int(getattr(hc, "HISTORY_MAX_TOOL_RESULT_CHARS", 12_000) or 12_000)
+        except Exception:
+            return 12_000
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 12_000
+    return max(512, min(2_000_000, v))
+
+
+def set_history_max_tool_result_chars(value: int | str) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("history_max_tool_result_chars 必须是整数 512–2000000") from e
+    v = max(512, min(2_000_000, v))
+    _set_setting_value("history_max_tool_result_chars", v)
+    try:
+        import history_compact as hc
+
+        hc.HISTORY_MAX_TOOL_RESULT_CHARS = v
+    except Exception:
+        pass
+    return v
+
+
+def get_history_tool_result_max_chars() -> int:
+    return get_history_max_tool_result_chars()
+
+
+def set_history_tool_result_max_chars(value: int | str) -> int:
+    return set_history_max_tool_result_chars(value)
 
 
 def get_sse_keepalive() -> float:
@@ -1281,6 +1453,12 @@ def set_conversation_affinity_enabled(enabled: bool) -> bool:
     except Exception:
         pass
     try:
+        import config as _cfg
+
+        _cfg.CONVERSATION_AFFINITY = val
+    except Exception:
+        pass
+    try:
         import conversation_affinity as ca
 
         if hasattr(ca, "_enabled_cache"):
@@ -1288,6 +1466,232 @@ def set_conversation_affinity_enabled(enabled: bool) -> bool:
     except Exception:
         pass
     return val
+
+
+def get_conversation_affinity_ttl_sec() -> float:
+    raw = _get_setting_value("conversation_affinity_ttl_sec", None)
+    if raw is None:
+        try:
+            from config import AFFINITY_TTL
+
+            return float(AFFINITY_TTL or 7200.0)
+        except Exception:
+            return 7200.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 7200.0
+    return max(60.0, min(86_400.0, v))
+
+
+def set_conversation_affinity_ttl_sec(value: float | str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("conversation_affinity_ttl_sec 必须是数字 60–86400") from e
+    v = max(60.0, min(86_400.0, v))
+    _set_setting_value("conversation_affinity_ttl_sec", v)
+    try:
+        import config as _cfg
+
+        _cfg.AFFINITY_TTL = v
+    except Exception:
+        pass
+    return v
+
+
+def get_token_maintain_interval_sec() -> float:
+    raw = _get_setting_value("token_maintain_interval_sec", None)
+    if raw is None:
+        try:
+            from config import TOKEN_MAINTAIN_INTERVAL
+
+            return float(TOKEN_MAINTAIN_INTERVAL or 90.0)
+        except Exception:
+            return 90.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 90.0
+    return max(30.0, min(3_600.0, v))
+
+
+def set_token_maintain_interval_sec(value: float | str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("token_maintain_interval_sec 必须是数字 30–3600") from e
+    v = max(30.0, min(3_600.0, v))
+    _set_setting_value("token_maintain_interval_sec", v)
+    try:
+        import config as _cfg
+
+        _cfg.TOKEN_MAINTAIN_INTERVAL = v
+    except Exception:
+        pass
+    try:
+        import token_maintainer
+
+        if hasattr(token_maintainer, "request_run_soon"):
+            # Nudge loop so a shorter interval takes effect without waiting full cycle.
+            token_maintainer.request_run_soon(force=False)
+    except Exception:
+        pass
+    return v
+
+
+def get_token_refresh_skew_sec() -> float:
+    raw = _get_setting_value("token_refresh_skew_sec", None)
+    if raw is None:
+        try:
+            from config import TOKEN_REFRESH_SKEW
+
+            return float(TOKEN_REFRESH_SKEW or 120.0)
+        except Exception:
+            return 120.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 120.0
+    return max(30.0, min(1_800.0, v))
+
+
+def set_token_refresh_skew_sec(value: float | str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("token_refresh_skew_sec 必须是数字 30–1800") from e
+    v = max(30.0, min(1_800.0, v))
+    _set_setting_value("token_refresh_skew_sec", v)
+    try:
+        import config as _cfg
+
+        _cfg.TOKEN_REFRESH_SKEW = v
+    except Exception:
+        pass
+    return v
+
+
+def get_model_health_interval_sec() -> float:
+    raw = _get_setting_value("model_health_interval_sec", None)
+    if raw is None:
+        try:
+            from config import MODEL_HEALTH_INTERVAL
+
+            return float(MODEL_HEALTH_INTERVAL or 900.0)
+        except Exception:
+            return 900.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 900.0
+    # 0 = on-demand only (still allowed via env); UI min is 60 when enabling periodic.
+    return max(0.0, min(86_400.0, v))
+
+
+def set_model_health_interval_sec(value: float | str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("model_health_interval_sec 必须是数字 0–86400") from e
+    v = max(0.0, min(86_400.0, v))
+    if 0 < v < 60:
+        v = 60.0
+    _set_setting_value("model_health_interval_sec", v)
+    try:
+        import config as _cfg
+
+        _cfg.MODEL_HEALTH_INTERVAL = v
+    except Exception:
+        pass
+    try:
+        import model_health
+
+        if hasattr(model_health, "request_run_soon"):
+            model_health.request_run_soon()
+    except Exception:
+        pass
+    return v
+
+
+def get_model_health_auto_disable() -> bool:
+    raw = _get_setting_value("model_health_auto_disable", None)
+    if raw is None:
+        try:
+            from config import MODEL_HEALTH_AUTO_DISABLE
+
+            return bool(MODEL_HEALTH_AUTO_DISABLE)
+        except Exception:
+            return True
+    return bool(raw)
+
+
+def set_model_health_auto_disable(enabled: bool) -> bool:
+    val = bool(enabled)
+    _set_setting_value("model_health_auto_disable", val)
+    try:
+        import config as _cfg
+
+        _cfg.MODEL_HEALTH_AUTO_DISABLE = val
+    except Exception:
+        pass
+    return val
+
+
+def _parse_probe_models(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        text = str(raw).replace(";", ",").replace("\n", ",").replace("\r", ",")
+        items = [p.strip() for p in text.split(",") if p.strip()]
+    # Dedup preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in items:
+        if m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out[:32]
+
+
+def get_probe_models() -> list[str]:
+    raw = _get_setting_value("probe_models", None)
+    models = _parse_probe_models(raw)
+    if models:
+        return models
+    try:
+        from config import PROBE_MODELS, DEFAULT_MODEL
+
+        env_models = [str(m).strip() for m in (PROBE_MODELS or []) if str(m).strip()]
+        if env_models:
+            return env_models
+        return [str(DEFAULT_MODEL or "grok-4.5")]
+    except Exception:
+        return ["grok-4.5"]
+
+
+def set_probe_models(value: Any) -> list[str]:
+    models = _parse_probe_models(value)
+    if not models:
+        try:
+            from config import DEFAULT_MODEL
+
+            models = [str(DEFAULT_MODEL or "grok-4.5")]
+        except Exception:
+            models = ["grok-4.5"]
+    # Persist as comma-separated for simple UI round-trip
+    joined = ", ".join(models)
+    _set_setting_value("probe_models", joined)
+    try:
+        import config as _cfg
+
+        _cfg.PROBE_MODELS = list(models)
+    except Exception:
+        pass
+    return models
 
 
 def get_default_model_setting() -> str:
@@ -1340,6 +1744,10 @@ def apply_runtime_settings_to_modules() -> None:
     except Exception:
         pass
     try:
+        set_outbound_max_tools_openai(get_outbound_max_tools_openai())
+    except Exception:
+        pass
+    try:
         set_outbound_tool_gap_sec(get_outbound_tool_gap_sec())
     except Exception:
         pass
@@ -1348,11 +1756,47 @@ def apply_runtime_settings_to_modules() -> None:
     except Exception:
         pass
     try:
+        set_history_compact_auto_chars(get_history_compact_auto_chars())
+    except Exception:
+        pass
+    try:
+        set_history_keep_tool_rounds(get_history_keep_tool_rounds())
+    except Exception:
+        pass
+    try:
+        set_history_max_tool_result_chars(get_history_max_tool_result_chars())
+    except Exception:
+        pass
+    try:
         set_sse_keepalive(get_sse_keepalive())
     except Exception:
         pass
     try:
         set_conversation_affinity_enabled(get_conversation_affinity_enabled())
+    except Exception:
+        pass
+    try:
+        set_conversation_affinity_ttl_sec(get_conversation_affinity_ttl_sec())
+    except Exception:
+        pass
+    try:
+        set_token_maintain_interval_sec(get_token_maintain_interval_sec())
+    except Exception:
+        pass
+    try:
+        set_token_refresh_skew_sec(get_token_refresh_skew_sec())
+    except Exception:
+        pass
+    try:
+        set_model_health_interval_sec(get_model_health_interval_sec())
+    except Exception:
+        pass
+    try:
+        set_model_health_auto_disable(get_model_health_auto_disable())
+    except Exception:
+        pass
+    try:
+        set_probe_models(get_probe_models())
     except Exception:
         pass
     try:
@@ -2716,10 +3160,28 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
         set_reasoning_compat(str(patch["reasoning_compat"]))
     if "outbound_max_tools" in patch and patch["outbound_max_tools"] is not None:
         set_outbound_max_tools(patch["outbound_max_tools"])
+    if "outbound_max_tools_openai" in patch and patch["outbound_max_tools_openai"] is not None:
+        set_outbound_max_tools_openai(patch["outbound_max_tools_openai"])
     if "outbound_tool_gap_sec" in patch and patch["outbound_tool_gap_sec"] is not None:
         set_outbound_tool_gap_sec(patch["outbound_tool_gap_sec"])
     if "history_compact_enabled" in patch and patch["history_compact_enabled"] is not None:
         set_history_compact_enabled(bool(patch["history_compact_enabled"]))
+    if "history_compact_auto_chars" in patch and patch["history_compact_auto_chars"] is not None:
+        set_history_compact_auto_chars(patch["history_compact_auto_chars"])
+    if "history_keep_tool_rounds" in patch and patch["history_keep_tool_rounds"] is not None:
+        set_history_keep_tool_rounds(patch["history_keep_tool_rounds"])
+    elif "history_keep_recent_turns" in patch and patch["history_keep_recent_turns"] is not None:
+        set_history_keep_tool_rounds(patch["history_keep_recent_turns"])
+    if (
+        "history_max_tool_result_chars" in patch
+        and patch["history_max_tool_result_chars"] is not None
+    ):
+        set_history_max_tool_result_chars(patch["history_max_tool_result_chars"])
+    elif (
+        "history_tool_result_max_chars" in patch
+        and patch["history_tool_result_max_chars"] is not None
+    ):
+        set_history_max_tool_result_chars(patch["history_tool_result_max_chars"])
     if "sse_keepalive" in patch and patch["sse_keepalive"] is not None:
         set_sse_keepalive(patch["sse_keepalive"])
     if (
@@ -2727,6 +3189,30 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
         and patch["conversation_affinity_enabled"] is not None
     ):
         set_conversation_affinity_enabled(bool(patch["conversation_affinity_enabled"]))
+    if (
+        "conversation_affinity_ttl_sec" in patch
+        and patch["conversation_affinity_ttl_sec"] is not None
+    ):
+        set_conversation_affinity_ttl_sec(patch["conversation_affinity_ttl_sec"])
+    if (
+        "token_maintain_interval_sec" in patch
+        and patch["token_maintain_interval_sec"] is not None
+    ):
+        set_token_maintain_interval_sec(patch["token_maintain_interval_sec"])
+    if "token_refresh_skew_sec" in patch and patch["token_refresh_skew_sec"] is not None:
+        set_token_refresh_skew_sec(patch["token_refresh_skew_sec"])
+    if (
+        "model_health_interval_sec" in patch
+        and patch["model_health_interval_sec"] is not None
+    ):
+        set_model_health_interval_sec(patch["model_health_interval_sec"])
+    if (
+        "model_health_auto_disable" in patch
+        and patch["model_health_auto_disable"] is not None
+    ):
+        set_model_health_auto_disable(bool(patch["model_health_auto_disable"]))
+    if "probe_models" in patch and patch["probe_models"] is not None:
+        set_probe_models(patch["probe_models"])
     if "default_model" in patch and patch["default_model"] is not None:
         set_default_model_setting(str(patch["default_model"]))
     if "account_mode" in patch and patch["account_mode"] is not None:
@@ -2760,6 +3246,13 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
         set_pool_policy(pool_patch)
     if "registration_config" in patch and patch["registration_config"] is not None:
         set_registration_config(patch["registration_config"])
+    if "sub2api_config" in patch and patch["sub2api_config"] is not None:
+        try:
+            from sub2api_client import set_sub2api_config
+
+            set_sub2api_config(patch["sub2api_config"], replace=False)
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"sub2api_config: {e}") from e
     # Outbound proxy pool (flat fields or nested outbound_proxy / outbound_proxy_config)
     ob_patch: dict[str, Any] = {}
     for nested_key in ("outbound_proxy_config", "outbound_proxy"):
@@ -2804,6 +3297,12 @@ def get_public_settings() -> dict[str, Any]:
             "source": "settings" if outbound.get("proxy") else "none",
             "preview": [],
         }
+    try:
+        from sub2api_client import public_sub2api_config
+        sub2api_pub = public_sub2api_config()
+    except Exception:
+        sub2api_pub = {"enabled": False, "base_url": "", "email": "", "has_password": False}
+
     return {
         "account_mode": get_account_mode(),
         "account_modes": list(VALID_ACCOUNT_MODES),
@@ -2821,14 +3320,25 @@ def get_public_settings() -> dict[str, Any]:
         "reasoning_compat": get_reasoning_compat(),
         "reasoning_compat_options": list(_VALID_REASONING),
         "outbound_max_tools": get_outbound_max_tools(),
+        "outbound_max_tools_openai": get_outbound_max_tools_openai(),
         "outbound_tool_gap_sec": get_outbound_tool_gap_sec(),
         "history_compact_enabled": get_history_compact_enabled(),
+        "history_compact_auto_chars": get_history_compact_auto_chars(),
+        "history_keep_tool_rounds": get_history_keep_tool_rounds(),
+        "history_max_tool_result_chars": get_history_max_tool_result_chars(),
         "sse_keepalive": get_sse_keepalive(),
         "conversation_affinity_enabled": get_conversation_affinity_enabled(),
+        "conversation_affinity_ttl_sec": get_conversation_affinity_ttl_sec(),
+        "token_maintain_interval_sec": get_token_maintain_interval_sec(),
+        "token_refresh_skew_sec": get_token_refresh_skew_sec(),
+        "model_health_interval_sec": get_model_health_interval_sec(),
+        "model_health_auto_disable": get_model_health_auto_disable(),
+        "probe_models": get_probe_models(),
         "default_model": get_default_model_setting(),
         "pool_policy": get_pool_policy(),
         "registration_config": reg,
         "outbound_proxy_config": outbound,
         "outbound_proxy_pool": outbound_summary,
+        "sub2api_config": sub2api_pub,
         "updated_at": data.get("updated_at"),
     }

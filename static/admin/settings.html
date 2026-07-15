@@ -174,10 +174,10 @@
   <div class="g2a-card-head">
     <div>
       <h3>轮询与维护</h3>
-      <p>账号选择策略与后台维护开关（立即生效）。</p>
+      <p>账号选择策略与后台维护开关（立即生效）。间隔类改完保存后下一周期生效。</p>
     </div>
   </div>
-  <div class="g2a-form-grid" style="display:grid;gap:14px;max-width:640px">
+  <div class="g2a-form-grid" style="display:grid;gap:14px;max-width:720px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
     <div class="g2a-field">
       <label for="set-account-mode">账号轮询模式</label>
       <select id="set-account-mode" class="g2a-input">
@@ -190,9 +190,35 @@
       <label for="set-default-model">默认模型</label>
       <input id="set-default-model" type="text" class="g2a-input" placeholder="grok-4.5" />
     </div>
-    <div class="g2a-actions" style="flex-wrap:wrap;gap:16px">
+    <div class="g2a-field" style="grid-column:1/-1">
+      <label for="set-probe-models">健康探测模型列表</label>
+      <input id="set-probe-models" type="text" class="g2a-input" placeholder="grok-4.5, grok-4" />
+      <div class="g2a-muted" style="margin-top:4px">逗号分隔；后台每轮轮询其中一个，避免笛卡尔积打爆池子</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-token-maintain-interval">Token 维护间隔（秒）</label>
+      <input id="set-token-maintain-interval" type="number" class="g2a-input" min="30" max="3600" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">默认 90；大池子可适当调高减轻刷新风暴</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-token-refresh-skew">Token 提前刷新窗口（秒）</label>
+      <input id="set-token-refresh-skew" type="number" class="g2a-input" min="30" max="1800" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">到期前多少秒开始刷新；默认 120</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-model-health-interval">模型健康探测间隔（秒）</label>
+      <input id="set-model-health-interval" type="number" class="g2a-input" min="0" max="86400" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">0 = 仅手动；≥60 为周期探测。默认 900</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-affinity-ttl">会话粘性 TTL（秒）</label>
+      <input id="set-affinity-ttl" type="number" class="g2a-input" min="60" max="86400" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">多轮对话绑定同一账号的缓存时长；默认 7200（2h）</div>
+    </div>
+    <div class="g2a-actions" style="grid-column:1/-1;flex-wrap:wrap;gap:16px">
       <label class="g2a-check"><input type="checkbox" id="set-token-maintain" /> Token 自动续期</label>
       <label class="g2a-check"><input type="checkbox" id="set-model-health" /> 模型健康探测</label>
+      <label class="g2a-check"><input type="checkbox" id="set-model-health-auto-disable" /> 探测失败自动踢出/封禁</label>
       <label class="g2a-check"><input type="checkbox" id="set-affinity" /> 会话粘性（同对话绑同一账号）</label>
     </div>
   </div>
@@ -238,11 +264,11 @@
   <div class="g2a-card-head">
     <div>
       <h3>Relay / sub2api 参数</h3>
-      <p>影响 Claude Code / sub2api 工具流与 reasoning 兼容。单工具 + 间隔可避免 “Content block not found”。</p>
+      <p>影响 Claude Code / sub2api 工具流、reasoning 兼容与长上下文压缩。单工具 + 间隔可避免 “Content block not found”。</p>
     </div>
   </div>
-  <div class="g2a-form-grid" style="display:grid;gap:14px;max-width:640px">
-    <div class="g2a-field">
+  <div class="g2a-form-grid" style="display:grid;gap:14px;max-width:720px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+    <div class="g2a-field" style="grid-column:1/-1">
       <label for="set-reasoning">Reasoning 兼容模式</label>
       <select id="set-reasoning" class="g2a-input">
         <option value="off">off · 仅 reasoning_content（推荐 sub2api）</option>
@@ -251,9 +277,14 @@
       </select>
     </div>
     <div class="g2a-field">
-      <label for="set-max-tools">每轮最多输出工具数（0=不限）</label>
+      <label for="set-max-tools">每轮最多工具数 · Claude/sub2api（0=不限）</label>
       <input id="set-max-tools" type="number" class="g2a-input" min="0" max="64" step="1" />
       <div class="g2a-muted" style="margin-top:4px">sub2api / Claude Code 建议保持 1</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-max-tools-openai">每轮最多工具数 · OpenAI chat（0=不限）</label>
+      <input id="set-max-tools-openai" type="number" class="g2a-input" min="0" max="64" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">仅 /v1/chat/completions；默认 0</div>
     </div>
     <div class="g2a-field">
       <label for="set-tool-gap">工具 SSE 间隔（秒）</label>
@@ -264,7 +295,22 @@
       <label for="set-sse-keepalive">SSE 保活间隔（秒）</label>
       <input id="set-sse-keepalive" type="number" class="g2a-input" min="2" max="120" step="1" />
     </div>
-    <div class="g2a-actions">
+    <div class="g2a-field">
+      <label for="set-history-auto-chars">自动压缩阈值（字符）</label>
+      <input id="set-history-auto-chars" type="number" class="g2a-input" min="0" max="5000000" step="1000" />
+      <div class="g2a-muted" style="margin-top:4px">messages JSON 超过此长度时自动压缩；0=关闭。默认 180000</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-history-keep-rounds">保留最近工具轮数</label>
+      <input id="set-history-keep-rounds" type="number" class="g2a-input" min="1" max="64" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">压缩时完整保留最近 N 轮 tool 调用；默认 6</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-history-tool-max">单条 tool 结果上限（字符）</label>
+      <input id="set-history-tool-max" type="number" class="g2a-input" min="512" max="2000000" step="100" />
+      <div class="g2a-muted" style="margin-top:4px">超出截断；默认 12000</div>
+    </div>
+    <div class="g2a-actions" style="grid-column:1/-1">
       <label class="g2a-check"><input type="checkbox" id="set-history-compact" /> 历史压缩（长工具循环时缩小请求体）</label>
     </div>
   </div>
@@ -331,6 +377,84 @@
   </div>
 </section>
 
+</section>
+
+<section class="g2a-card" id="sec-sub2api">
+  <div class="g2a-card-head">
+    <h2>sub2api 导入</h2>
+    <span id="sub2api-pill" class="g2a-tag">—</span>
+  </div>
+  <p class="g2a-muted" style="margin:0 0 12px;line-height:1.55">
+    配置 <a href="https://github.com/Wei-Shaw/sub2api" target="_blank" rel="noopener">sub2api</a> 管理端地址与登录后，
+    可在「账号」页将本地 Grok 账号<strong>批量导入</strong>到指定分组（平台 <code>grok</code> / OAuth）。
+    优先使用本地 access/refresh token 直推；无 token 时回退 SSO→OAuth。
+  </p>
+  <div class="g2a-form-grid">
+    <div class="g2a-field">
+      <label class="g2a-check"><input type="checkbox" id="set-sub2api-enabled" /> 启用 sub2api 导入</label>
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label for="set-sub2api-url">sub2api URL</label>
+      <input id="set-sub2api-url" type="url" class="g2a-input" placeholder="https://sub2api.example.com" autocomplete="off" />
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-email">登录邮箱</label>
+      <input id="set-sub2api-email" type="email" class="g2a-input" placeholder="admin@example.com" autocomplete="username" />
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-password">登录密码</label>
+      <input id="set-sub2api-password" type="password" class="g2a-input" placeholder="已保存则留空不改" autocomplete="new-password" />
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-group-id">默认分组 ID</label>
+      <input id="set-sub2api-group-id" type="number" class="g2a-input" min="1" step="1" placeholder="可选，优先于名称" />
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-group-name">默认分组名</label>
+      <input id="set-sub2api-group-name" type="text" class="g2a-input" placeholder="grokcli-2api" />
+    </div>
+    <div class="g2a-field">
+      <label class="g2a-check"><input type="checkbox" id="set-sub2api-auto-group" checked /> 分组不存在时自动创建</label>
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-concurrency">推送并发</label>
+      <input id="set-sub2api-concurrency" type="number" class="g2a-input" min="1" max="16" step="1" value="4" />
+      <div class="g2a-muted" style="margin-top:4px">本地→sub2api 同时推送几个账号；默认 4</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-account-concurrency">账号容量（concurrency）</label>
+      <input id="set-sub2api-account-concurrency" type="number" class="g2a-input" min="1" max="100" step="1" value="3" />
+      <div class="g2a-muted" style="margin-top:4px">写入 sub2api 每个账号的并发容量；在线推送与导出数据均生效。默认 3</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-account-priority">账号优先级</label>
+      <input id="set-sub2api-account-priority" type="number" class="g2a-input" min="0" max="100" step="1" value="50" />
+      <div class="g2a-muted" style="margin-top:4px">sub2api account.priority；默认 50</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-account-rate">倍率 rate_multiplier</label>
+      <input id="set-sub2api-account-rate" type="number" class="g2a-input" min="0.1" max="10" step="0.1" value="1" />
+      <div class="g2a-muted" style="margin-top:4px">sub2api 计费/限速倍率；默认 1.0</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-sub2api-notes">notes 前缀</label>
+      <input id="set-sub2api-notes" type="text" class="g2a-input" placeholder="grokcli-2api" />
+    </div>
+  </div>
+  <div class="g2a-actions" style="margin-top:12px;flex-wrap:wrap;gap:8px">
+    <button type="button" class="g2a-btn g2a-btn-default" id="btn-sub2api-test">测试连接</button>
+    <button type="button" class="g2a-btn g2a-btn-default" id="btn-sub2api-load-groups">刷新分组</button>
+    <button type="button" class="g2a-btn g2a-btn-default" id="btn-sub2api-create-group">创建分组</button>
+    <select id="set-sub2api-group-select" class="g2a-input" style="min-width:220px" title="选择后写入默认分组 ID">
+      <option value="">— 选择已有分组 —</option>
+    </select>
+  </div>
+  <pre id="sub2api-test-result" class="g2a-log" style="margin-top:10px;max-height:160px;display:none"></pre>
+  <p class="g2a-muted" style="margin:10px 0 0;line-height:1.55" id="sub2api-hint">
+    保存后到「账号」页：可「导入 sub2api（选中/全部）」在线推送；或「导出 sub2api 数据」下载官方 <code>sub2api-data</code> 备份，在 sub2api 管理台「导入数据」上传。
+  </p>
+</section>
+
 <section class="g2a-card">
   <div class="g2a-actions" style="justify-content:space-between;flex-wrap:wrap;gap:12px">
     <div class="g2a-muted" id="settings-updated-at">—</div>
@@ -348,6 +472,6 @@
   <script src="/static/dist/api.b6d8a65a8a.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/state.da9974e23b.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/auth.4835665ff4.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/core.8a5df2f912.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.eaf06d79f0.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
 </body>
 </html>

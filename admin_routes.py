@@ -126,10 +126,22 @@ class RuntimeSettingsBody(BaseModel):
         default=None, description="off | think_tag | content"
     )
     outbound_max_tools: int | None = Field(default=None, ge=0, le=64)
+    outbound_max_tools_openai: int | None = Field(default=None, ge=0, le=64)
     outbound_tool_gap_sec: float | None = Field(default=None, ge=0.0, le=2.0)
     history_compact_enabled: bool | None = None
+    history_compact_auto_chars: int | None = Field(default=None, ge=0, le=5_000_000)
+    history_keep_tool_rounds: int | None = Field(default=None, ge=1, le=64)
+    history_max_tool_result_chars: int | None = Field(default=None, ge=512, le=2_000_000)
     sse_keepalive: float | None = Field(default=None, ge=2.0, le=120.0)
     conversation_affinity_enabled: bool | None = None
+    conversation_affinity_ttl_sec: float | None = Field(default=None, ge=60.0, le=86_400.0)
+    token_maintain_interval_sec: float | None = Field(default=None, ge=30.0, le=3600.0)
+    token_refresh_skew_sec: float | None = Field(default=None, ge=30.0, le=1800.0)
+    model_health_interval_sec: float | None = Field(default=None, ge=0.0, le=86_400.0)
+    model_health_auto_disable: bool | None = None
+    probe_models: str | list[str] | None = Field(
+        default=None, description="comma-separated or list of probe models"
+    )
     default_model: str | None = Field(default=None, max_length=128)
     # Pool rotation / cooldown policy
     cooldown_default_sec: float | None = Field(default=None, ge=1, le=600)
@@ -2044,11 +2056,12 @@ async def export_registration_sso(
     request: Request,
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
 ):
-    """Export SSO cookies from registration sessions.
+    """Export SSO cookies from registration sessions **and** durable account store.
 
-    Registration keeps ``sess["sso"]`` after import (in-memory session store).
-    OIDC accounts themselves only store tokens — use this to re-export the raw
-    SSO cookie for re-import / backup.
+    Preference order for each account/session:
+    1. Live registration session ``sess["sso"]`` (in-memory / Redis)
+    2. Durable account payload ``entry["sso"]`` / ``entry["sso_cookie"]``
+       (saved at import time after successful register-email)
     """
     require_admin(request, x_admin_token)
     adapter = _require_register_adapter()
@@ -2094,13 +2107,59 @@ async def export_registration_sso(
                 "email": email,
                 "password": password if body.include_password else "",
                 "sso": sso,
+                "source": "session",
             }
         )
+
+    # Fallback / supplement: durable accounts that already stored SSO at import.
+    # Used after process restart when registration sessions are gone.
+    try:
+        from accounts import load_auth_store
+
+        auth = load_auth_store() or {}
+        for aid, entry in (auth if isinstance(auth, dict) else {}).items():
+            if not isinstance(entry, dict):
+                continue
+            sso = str(entry.get("sso") or entry.get("sso_cookie") or "").strip()
+            if not sso:
+                continue
+            # Optional filters still apply when possible
+            if want_ids:
+                sid_hit = str(entry.get("registration_session_id") or "").strip()
+                if str(aid) not in want_ids and sid_hit not in want_ids:
+                    continue
+            if want_batch:
+                bid = str(entry.get("registration_batch_id") or "").strip()
+                if bid != want_batch:
+                    # Allow accounts without batch id only when no session rows
+                    # were found for this batch; otherwise skip non-matching.
+                    if bid:
+                        continue
+            if want_status and "done" not in want_status and "imported" not in want_status:
+                # Account-store SSO is always from completed imports
+                if want_status:
+                    continue
+            email = str(entry.get("email") or "").strip()
+            password = str(entry.get("password") or entry.get("register_password") or "").strip()
+            rows.append(
+                {
+                    "id": str(entry.get("registration_session_id") or aid),
+                    "account_id": aid,
+                    "batch_id": entry.get("registration_batch_id"),
+                    "status": "imported",
+                    "email": email,
+                    "password": password if body.include_password else "",
+                    "sso": sso,
+                    "source": "account",
+                }
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"[export-sso] account-store fallback skipped: {e}")
 
     if not rows:
         raise HTTPException(
             status_code=404,
-            detail="no registration sessions with SSO cookie matched filters",
+            detail="no registration sessions or accounts with SSO cookie matched filters",
         )
 
     # De-dupe by sso value, keep first email
@@ -3162,6 +3221,337 @@ async def download_json_export_job(
             "Cache-Control": "no-store",
         },
     )
+
+
+
+
+@router.get("/settings/sub2api")
+async def get_sub2api_settings(
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Return redacted sub2api push config for admin UI."""
+    require_admin(request, x_admin_token)
+    from sub2api_client import public_sub2api_config
+
+    return {"ok": True, "config": public_sub2api_config()}
+
+
+class Sub2ApiConfigBody(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = None
+    email: str | None = None
+    password: str | None = None
+    group_id: int | None = None
+    group_name: str | None = None
+    auto_create_group: bool | None = None
+    concurrency: int | None = Field(
+        default=None, ge=1, le=16, description="Local push parallelism"
+    )
+    account_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="Per-account capacity written into sub2api account.concurrency",
+    )
+    account_capacity: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="Alias of account_concurrency",
+    )
+    account_priority: int | None = Field(default=None, ge=0, le=100)
+    account_rate_multiplier: float | None = Field(default=None, ge=0.1, le=10.0)
+    notes_prefix: str | None = None
+    # When true, also run login + list groups after save.
+    test: bool | None = None
+
+
+@router.put("/settings/sub2api")
+async def put_sub2api_settings(
+    body: Sub2ApiConfigBody,
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Save sub2api URL / login / default group. Blank password keeps previous."""
+    require_admin(request, x_admin_token)
+    from sub2api_client import (
+        public_sub2api_config,
+        set_sub2api_config,
+        test_connection,
+    )
+
+    patch = body.model_dump(exclude_none=True)
+    do_test = bool(patch.pop("test", False))
+    # UI / API may send account_capacity as alias of account_concurrency
+    if patch.get("account_concurrency") is None and patch.get("account_capacity") is not None:
+        patch["account_concurrency"] = patch.pop("account_capacity")
+    else:
+        patch.pop("account_capacity", None)
+    try:
+        set_sub2api_config(patch, replace=False)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    out: dict[str, Any] = {"ok": True, "config": public_sub2api_config()}
+    if do_test:
+        out["test"] = test_connection()
+        out["ok"] = bool(out["test"].get("ok"))
+    return out
+
+
+@router.post("/settings/sub2api/test")
+async def test_sub2api_settings(
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Login to sub2api and list groups (connection smoke test)."""
+    require_admin(request, x_admin_token)
+    from sub2api_client import test_connection
+
+    result = test_connection()
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "test failed")
+    return result
+
+
+@router.get("/settings/sub2api/groups")
+async def list_sub2api_groups(
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """List groups from configured sub2api (for dropdown)."""
+    require_admin(request, x_admin_token)
+    from sub2api_client import list_groups
+
+    try:
+        groups = list_groups()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "groups": groups, "count": len(groups)}
+
+
+class Sub2ApiCreateGroupBody(BaseModel):
+    name: str
+    description: str | None = None
+    platform: str | None = "grok"
+    set_default: bool | None = True
+
+
+@router.post("/settings/sub2api/groups")
+async def create_sub2api_group(
+    body: Sub2ApiCreateGroupBody,
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Create a group on sub2api and optionally set it as default."""
+    require_admin(request, x_admin_token)
+    from sub2api_client import create_group, public_sub2api_config, set_sub2api_config
+
+    name = str(body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        created = create_group(
+            name,
+            platform=str(body.platform or "grok"),
+            description=str(body.description or "created by grokcli-2api"),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    gid = created.get("id")
+    if body.set_default and gid is not None:
+        try:
+            set_sub2api_config({"group_id": int(gid), "group_name": name})
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "group": created,
+        "config": public_sub2api_config(),
+    }
+
+
+class Sub2ApiPushBody(BaseModel):
+    """Push local accounts into sub2api.
+
+    - all=true or account_ids omitted → all accounts
+    - account_ids: ["id1", ...] → selected only
+    """
+
+    account_ids: list[str] | None = None
+    group_id: int | None = None
+    concurrency: int | None = None
+    all: bool | None = None
+
+
+@router.post("/accounts/push-sub2api")
+async def push_accounts_to_sub2api(
+    body: Sub2ApiPushBody,
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Batch import local accounts into sub2api (selected or all)."""
+    require_admin(request, x_admin_token)
+    from sub2api_client import public_sub2api_config, push_accounts
+
+    cfg = public_sub2api_config()
+    if not cfg.get("base_url"):
+        raise HTTPException(
+            status_code=400,
+            detail="请先在设置页填写 sub2api URL 与登录信息",
+        )
+    ids = body.account_ids
+    push_all = bool(body.all) or ids is None
+    if not push_all and isinstance(ids, list) and len(ids) == 0:
+        raise HTTPException(status_code=400, detail="未选择账号")
+    try:
+        result = push_accounts(
+            None if push_all else list(ids or []),
+            group_id=body.group_id,
+            concurrency=body.concurrency,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return result
+
+
+@router.post("/accounts/export-sub2api-format")
+async def export_sub2api_format(
+    body: Sub2ApiPushBody,
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Export local accounts as official sub2api data-import JSON.
+
+    Shape matches Wei-Shaw/sub2api ``DataPayload`` used by
+    Admin → Accounts → 导入数据:
+
+      {
+        "type": "sub2api-data",
+        "version": 1,
+        "exported_at": "...",
+        "proxies": [],
+        "accounts": [ { name, platform, type, credentials, ... } ]
+      }
+
+    This is **not** CreateAccountRequest[]; the data-import modal rejects
+    anything without type=sub2api-data/sub2api-bundle and proxies+accounts arrays.
+    Includes secrets (access/refresh tokens). Admin-only.
+    """
+    require_admin(request, x_admin_token)
+    import time as _time
+    from sub2api_client import _entry_tokens, get_sub2api_config
+
+    data = accounts.read_auth_map() or {}
+    push_all = bool(body.all) or body.account_ids is None
+    if push_all:
+        items = [(k, v) for k, v in data.items() if isinstance(v, dict)]
+    else:
+        wanted = {str(x).strip() for x in (body.account_ids or []) if str(x).strip()}
+        if not wanted:
+            raise HTTPException(status_code=400, detail="未选择账号")
+        items = []
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            if k in wanted or str(v.get("email") or "") in wanted:
+                items.append((k, v))
+
+    cfg = get_sub2api_config(include_secrets=True)
+    notes_prefix = str(cfg.get("notes_prefix") or "grokcli-2api")
+    try:
+        acc_conc = int(cfg.get("account_concurrency") or 3)
+    except (TypeError, ValueError):
+        acc_conc = 3
+    acc_conc = max(1, min(100, acc_conc))
+    try:
+        acc_prio = int(cfg.get("account_priority") if cfg.get("account_priority") is not None else 50)
+    except (TypeError, ValueError):
+        acc_prio = 50
+    acc_prio = max(0, min(100, acc_prio))
+    try:
+        acc_rate = float(cfg.get("account_rate_multiplier") or 1.0)
+    except (TypeError, ValueError):
+        acc_rate = 1.0
+    acc_rate = max(0.1, min(10.0, acc_rate))
+    exported_at = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    data_accounts: list[dict[str, Any]] = []
+    skipped = 0
+    for aid, entry in items:
+        access, refresh = _entry_tokens(entry)
+        if not access:
+            skipped += 1
+            continue
+        email = str(entry.get("email") or "").strip()
+        name = email or str(aid)
+        notes = f"{notes_prefix}:{aid}"
+        credentials: dict[str, Any] = {
+            "access_token": access,
+            "email": email,
+        }
+        if refresh:
+            credentials["refresh_token"] = refresh
+
+        # DataAccount.expires_at is unix seconds (not ISO string).
+        exp_unix: int | None = None
+        raw_exp = entry.get("expires_at")
+        try:
+            if isinstance(raw_exp, (int, float)) and float(raw_exp) > 0:
+                exp_unix = int(float(raw_exp))
+            elif isinstance(raw_exp, str) and raw_exp.strip():
+                # ISO → unix
+                from datetime import datetime
+
+                s = raw_exp.strip().replace("Z", "+00:00")
+                exp_unix = int(datetime.fromisoformat(s).timestamp())
+        except Exception:
+            exp_unix = None
+        if exp_unix is None:
+            # JWT exp claim
+            try:
+                import base64
+                import json as _json
+
+                parts = access.split(".")
+                if len(parts) >= 2:
+                    pad = "=" * (-len(parts[1]) % 4)
+                    payload = _json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+                    if payload.get("exp"):
+                        exp_unix = int(payload["exp"])
+            except Exception:
+                exp_unix = None
+
+        row: dict[str, Any] = {
+            "name": name[:200],
+            "notes": notes,
+            "platform": "grok",
+            "type": "oauth",
+            "credentials": credentials,
+            "extra": {
+                "email": email,
+                "local_account_id": aid,
+                "source": "grokcli-2api",
+            },
+            "concurrency": acc_conc,
+            "priority": acc_prio,
+            "rate_multiplier": acc_rate,
+            "auto_pause_on_expired": True,
+        }
+        if exp_unix:
+            row["expires_at"] = exp_unix
+        data_accounts.append(row)
+
+    # Official DataPayload — accepted by sub2api ImportDataModal / validateDataHeader.
+    payload = {
+        "type": "sub2api-data",
+        "version": 1,
+        "exported_at": exported_at,
+        "proxies": [],
+        "accounts": data_accounts,
+    }
+    if skipped:
+        payload["skipped_no_token"] = skipped
+    return payload
 
 
 @router.post("/accounts/logout")

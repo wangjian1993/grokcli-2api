@@ -28,13 +28,37 @@ _MIN_REMAINING_CACHE_TTL = 15.0
 
 def _interval() -> float:
     try:
+        from settings_store import get_token_maintain_interval_sec
+
         # Allow 30s+ so operators can run faster recovery batches (e.g. 90s).
+        return max(30.0, float(get_token_maintain_interval_sec()))
+    except Exception:
+        pass
+    try:
+        from config import TOKEN_MAINTAIN_INTERVAL
+
+        return max(30.0, float(TOKEN_MAINTAIN_INTERVAL or 90.0))
+    except Exception:
+        pass
+    try:
         return max(30.0, float(os.getenv("GROK2API_TOKEN_MAINTAIN_INTERVAL", "90")))
     except ValueError:
         return 90.0
 
 
 def _skew() -> float:
+    try:
+        from settings_store import get_token_refresh_skew_sec
+
+        return max(30.0, float(get_token_refresh_skew_sec()))
+    except Exception:
+        pass
+    try:
+        from config import TOKEN_REFRESH_SKEW
+
+        return max(30.0, float(TOKEN_REFRESH_SKEW or 120.0))
+    except Exception:
+        pass
     try:
         return float(os.getenv("GROK2API_TOKEN_REFRESH_SKEW", "120"))
     except ValueError:
