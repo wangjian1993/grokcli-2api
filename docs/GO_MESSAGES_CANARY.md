@@ -306,6 +306,7 @@ Supported now:
 - auth: setup/login/session/logout (Redis session preferred, PG fallback)
 - write: keys create / patch / regenerate / delete
 - write: accounts enable/disable, kick (cooldown/hard), cooldown clear
+- write: settings PUT/PATCH runtime scalars (no registration/proxy secrets)
 
 Not yet in Go (stay on Python):
 

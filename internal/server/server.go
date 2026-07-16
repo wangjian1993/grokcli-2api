@@ -235,6 +235,18 @@ func NewMux(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/accounts/{account_id}/cooldown/clear", func(w http.ResponseWriter, r *http.Request) {
 		serveAdminClearCooldown(w, r, options)
 	})
+	mux.HandleFunc("PUT /admin/api/settings", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminUpdateSettings(w, r, options)
+	})
+	mux.HandleFunc("PATCH /admin/api/settings", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminUpdateSettings(w, r, options)
+	})
+	mux.HandleFunc("PUT /admin/api/settings/runtime", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminUpdateSettings(w, r, options)
+	})
+	mux.HandleFunc("PATCH /admin/api/settings/runtime", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminUpdateSettings(w, r, options)
+	})
 	return mux
 }
 
@@ -1508,6 +1520,29 @@ func serveAdminAccounts(w http.ResponseWriter, r *http.Request, options Options)
 	writeJSON(w, http.StatusOK, result)
 }
 
+func serveAdminUpdateSettings(w http.ResponseWriter, r *http.Request, options Options) {
+	if !adminWriteAllowed(w, r, options) {
+		return
+	}
+	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
+		return
+	}
+	var patch map[string]any
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	settings, err := options.Store.UpdateRuntimeSettings(r.Context(), patch)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": settings})
+}
+
 func serveAdminSettings(w http.ResponseWriter, r *http.Request, options Options) {
 	if !adminRouteAllowed(w, r, options) {
 		return
@@ -1521,7 +1556,7 @@ func serveAdminSettings(w http.ResponseWriter, r *http.Request, options Options)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": settings})
 }
 
 func serveAdminLogs(w http.ResponseWriter, r *http.Request, options Options) {

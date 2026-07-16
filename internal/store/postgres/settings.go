@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -218,4 +219,198 @@ func (c *Connector) SetSetting(ctx context.Context, key string, value any) error
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 	`, key, encoded)
 	return err
+}
+
+// UpdateRuntimeSettings applies a partial admin settings patch to app_settings.
+// Only known scalar/runtime keys are accepted; registration secrets and proxy
+// credentials are intentionally not written here.
+func (c *Connector) UpdateRuntimeSettings(ctx context.Context, patch map[string]any) (map[string]any, error) {
+	if c == nil || c.Pool == nil {
+		return nil, errors.New("postgres unavailable")
+	}
+	if len(patch) == 0 {
+		return nil, errors.New("没有可更新的字段")
+	}
+	// Normalize aliases.
+	if v, ok := patch["history_keep_recent_turns"]; ok {
+		if _, exists := patch["history_keep_tool_rounds"]; !exists {
+			patch["history_keep_tool_rounds"] = v
+		}
+		delete(patch, "history_keep_recent_turns")
+	}
+	if v, ok := patch["history_tool_result_max_chars"]; ok {
+		if _, exists := patch["history_max_tool_result_chars"]; !exists {
+			patch["history_max_tool_result_chars"] = v
+		}
+		delete(patch, "history_tool_result_max_chars")
+	}
+
+	type fieldSpec struct {
+		key   string
+		kind  string // string|bool|int|float
+		minF  float64
+		maxF  float64
+		enums []string
+	}
+	specs := []fieldSpec{
+		{key: "account_mode", kind: "string", enums: []string{"round_robin", "random", "least_used"}},
+		{key: "token_maintain_enabled", kind: "bool"},
+		{key: "model_health_enabled", kind: "bool"},
+		{key: "reasoning_compat", kind: "string", enums: []string{"off", "think_tag", "content"}},
+		{key: "outbound_max_tools", kind: "int", minF: 0, maxF: 64},
+		{key: "outbound_max_tools_openai", kind: "int", minF: 0, maxF: 64},
+		{key: "outbound_tool_gap_sec", kind: "float", minF: 0, maxF: 2},
+		{key: "history_compact_enabled", kind: "bool"},
+		{key: "history_compact_auto_chars", kind: "int", minF: 0, maxF: 5_000_000},
+		{key: "history_keep_tool_rounds", kind: "int", minF: 1, maxF: 64},
+		{key: "history_max_tool_result_chars", kind: "int", minF: 512, maxF: 2_000_000},
+		{key: "sse_keepalive", kind: "float", minF: 2, maxF: 120},
+		{key: "conversation_affinity_enabled", kind: "bool"},
+		{key: "conversation_affinity_ttl_sec", kind: "float", minF: 60, maxF: 86400},
+		{key: "token_maintain_interval_sec", kind: "float", minF: 0, maxF: 3600},
+		{key: "token_refresh_skew_sec", kind: "float", minF: 0, maxF: 1800},
+		{key: "model_health_interval_sec", kind: "float", minF: 0, maxF: 86400},
+		{key: "model_health_auto_disable", kind: "bool"},
+		{key: "default_model", kind: "string"},
+		{key: "max_failover_attempts", kind: "int", minF: 1, maxF: 64},
+		{key: "cooldown_default_sec", kind: "float", minF: 1, maxF: 600},
+		{key: "cooldown_auth_sec", kind: "float", minF: 5, maxF: 1800},
+		{key: "cooldown_rate_limit_sec", kind: "float", minF: 5, maxF: 1800},
+		{key: "cooldown_server_error_sec", kind: "float", minF: 1, maxF: 600},
+		{key: "cooldown_max_sec", kind: "float", minF: 30, maxF: 3600},
+		{key: "soft_model_block_ttl_sec", kind: "float", minF: 30, maxF: 3600},
+		{key: "durable_model_block_ttl_sec", kind: "float", minF: 60, maxF: 86400},
+		{key: "probe_fail_kick_streak", kind: "int", minF: 1, maxF: 20},
+		{key: "probe_fail_disable_streak", kind: "int", minF: 2, maxF: 50},
+		{key: "probe_kick_cooldown_sec", kind: "float", minF: 30, maxF: 7200},
+	}
+	byKey := map[string]fieldSpec{}
+	for _, s := range specs {
+		byKey[s.key] = s
+	}
+
+	applied := 0
+	for key, raw := range patch {
+		if raw == nil {
+			continue
+		}
+		// probe_models accepts string or list
+		if key == "probe_models" {
+			var models []string
+			switch v := raw.(type) {
+			case string:
+				for _, part := range strings.Split(v, ",") {
+					part = strings.TrimSpace(part)
+					if part != "" {
+						models = append(models, part)
+					}
+				}
+			case []any:
+				for _, item := range v {
+					if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+						models = append(models, strings.TrimSpace(s))
+					}
+				}
+			case []string:
+				for _, s := range v {
+					if strings.TrimSpace(s) != "" {
+						models = append(models, strings.TrimSpace(s))
+					}
+				}
+			default:
+				return nil, fmt.Errorf("probe_models must be string or list")
+			}
+			if err := c.SetSetting(ctx, "probe_models", models); err != nil {
+				return nil, err
+			}
+			applied++
+			continue
+		}
+		spec, ok := byKey[key]
+		if !ok {
+			// ignore unknown keys (including registration/proxy secrets)
+			continue
+		}
+		var value any
+		switch spec.kind {
+		case "bool":
+			b, ok := raw.(bool)
+			if !ok {
+				return nil, fmt.Errorf("%s must be bool", key)
+			}
+			value = b
+		case "string":
+			s, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must be string", key)
+			}
+			s = strings.TrimSpace(s)
+			if len(spec.enums) > 0 {
+				found := false
+				for _, e := range spec.enums {
+					if s == e {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("%s must be one of: %s", key, strings.Join(spec.enums, ", "))
+				}
+			}
+			if key == "default_model" && len(s) > 128 {
+				s = s[:128]
+			}
+			value = s
+		case "int":
+			f, ok := asFloat(raw)
+			if !ok {
+				return nil, fmt.Errorf("%s must be number", key)
+			}
+			if f < spec.minF {
+				f = spec.minF
+			}
+			if f > spec.maxF {
+				f = spec.maxF
+			}
+			value = int64(f)
+		case "float":
+			f, ok := asFloat(raw)
+			if !ok {
+				return nil, fmt.Errorf("%s must be number", key)
+			}
+			if f < spec.minF {
+				f = spec.minF
+			}
+			if f > spec.maxF {
+				f = spec.maxF
+			}
+			value = f
+		}
+		if err := c.SetSetting(ctx, key, value); err != nil {
+			return nil, err
+		}
+		applied++
+	}
+	if applied == 0 {
+		return nil, errors.New("没有可更新的字段")
+	}
+	return c.PublicSettings(ctx)
+}
+
+func asFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
