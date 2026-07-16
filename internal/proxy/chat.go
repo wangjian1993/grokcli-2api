@@ -128,14 +128,19 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 		first = accounts[0].ID
 	}
 	var lastEmpty error
-	for len(accounts) > 0 {
-		attempt, err := OpenWithFailover(ctx, client, accounts, model, body, &CommitState{})
+	for i, account := range accounts {
+		s.markAttempt(ctx, account.ID)
+		attempt, err := OpenWithFailover(ctx, client, []grok.Account{account}, model, body, &CommitState{})
 		if err != nil {
-			s.releaseChain(ctx, chain)
-			if lastEmpty != nil {
-				return ChatResult{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, lastEmpty
+			// Retryable/non-retryable both continue within short chain until exhausted.
+			if i == len(accounts)-1 {
+				s.releaseChain(ctx, chain)
+				if lastEmpty != nil {
+					return ChatResult{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, lastEmpty
+				}
+				return ChatResult{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, err
 			}
-			return ChatResult{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, err
+			continue
 		}
 		collector := newChatCollector(model)
 		readErr := grok.ReadSSE(attempt.Body, collector.feed)
@@ -154,7 +159,6 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 			}, nil
 		}
 		lastEmpty = &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
-		accounts = remainingAccounts(accounts, attempt.Account.ID)
 	}
 	s.releaseChain(ctx, chain)
 	if lastEmpty == nil {
@@ -197,14 +201,18 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 		first = accounts[0].ID
 	}
 	var lastEmpty error
-	for len(accounts) > 0 {
-		attempt, err := OpenWithFailover(ctx, client, accounts, model, body, &CommitState{})
+	for i, account := range accounts {
+		s.markAttempt(ctx, account.ID)
+		attempt, err := OpenWithFailover(ctx, client, []grok.Account{account}, model, body, &CommitState{})
 		if err != nil {
-			s.releaseChain(ctx, chain)
-			if lastEmpty != nil {
-				return StreamOpen{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, lastEmpty
+			if i == len(accounts)-1 {
+				s.releaseChain(ctx, chain)
+				if lastEmpty != nil {
+					return StreamOpen{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, lastEmpty
+				}
+				return StreamOpen{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, err
 			}
-			return StreamOpen{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep}, err
+			continue
 		}
 		guarded, empty, err := guardStreamAgainstEmpty(attempt.Body)
 		if err != nil {
@@ -215,7 +223,6 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 		if empty {
 			_ = guarded.Close()
 			lastEmpty = &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
-			accounts = remainingAccounts(accounts, attempt.Account.ID)
 			continue
 		}
 		s.releaseChainExcept(ctx, chain, attempt.Account.ID)
@@ -288,6 +295,9 @@ func (s *ChatService) prepare(ctx context.Context, request ChatRequest, candidat
 	return model, picked, client, nil
 }
 
+// defaultFailoverChain matches Python MAX_FAILOVER_ATTEMPTS (short sticky-friendly chain).
+const defaultFailoverChain = 4
+
 func (s *ChatService) prepareChain(ctx context.Context, request ChatRequest, candidates []pool.Candidate, mode string) (string, []pool.Candidate, *grok.Client, error) {
 	model := s.resolveModel(request)
 	now := time.Now()
@@ -302,15 +312,12 @@ func (s *ChatService) prepareChain(ctx context.Context, request ChatRequest, can
 	if s.PickObserver != nil {
 		adjustCandidatesForObserver(ctxOrBackground(ctx), candidates, s.PickObserver)
 	}
-	chain := pool.Chain(candidates, model, mode, now, 0)
+	// Never build a full-pool chain: Python caps failover attempts (default 4).
+	chain := pool.Chain(candidates, model, mode, now, defaultFailoverChain)
 	if len(chain) == 0 {
 		return "", nil, nil, pool.ErrNoEligibleAccounts
 	}
-	if s.PickObserver != nil {
-		for _, candidate := range chain {
-			s.PickObserver.MarkPick(ctxOrBackground(ctx), candidate.ID)
-		}
-	}
+	// Account picks are marked when an attempt actually starts.
 	client := s.Client
 	if client == nil {
 		client = &grok.Client{}
@@ -520,7 +527,9 @@ func parseChatDelta(data []byte) (ChatDelta, error) {
 			if text, _ := itemDelta["content"].(string); text != "" {
 				delta.Content += text
 			}
-			if text := firstNonEmptyString(itemDelta["reasoning_content"], itemDelta["reasoning"]); text != "" {
+			if text := rawString(itemDelta["reasoning_content"]); text != "" {
+				delta.Reasoning += text
+			} else if text := rawString(itemDelta["reasoning"]); text != "" {
 				delta.Reasoning += text
 			}
 			if calls := toolCallsFromAny(itemDelta["tool_calls"]); len(calls) > 0 {
@@ -534,7 +543,9 @@ func parseChatDelta(data []byte) (ChatDelta, error) {
 			if text, _ := message["content"].(string); text != "" {
 				delta.Content += text
 			}
-			if text := firstNonEmptyString(message["reasoning_content"], message["reasoning"]); text != "" {
+			if text := rawString(message["reasoning_content"]); text != "" {
+				delta.Reasoning += text
+			} else if text := rawString(message["reasoning"]); text != "" {
 				delta.Reasoning += text
 			}
 			if calls := toolCallsFromAny(message["tool_calls"]); len(calls) > 0 {
@@ -567,6 +578,17 @@ func toolCallsFromAny(value any) []map[string]any {
 func stringValueAny(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func rawString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	default:
+		return ""
+	}
 }
 
 func (s *ChatService) resolveModel(request ChatRequest) string {
@@ -741,6 +763,13 @@ func (m *multiClose) Close() error {
 		return nil
 	}
 	return m.closer.Close()
+}
+
+func (s *ChatService) markAttempt(ctx context.Context, accountID string) {
+	if s == nil || s.PickObserver == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	s.PickObserver.MarkPick(ctxOrBackground(ctx), accountID)
 }
 
 func remainingAccounts(accounts []grok.Account, usedID string) []grok.Account {

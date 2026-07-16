@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -417,5 +418,37 @@ func TestGuardStreamAgainstEmptyReplaysModelOutput(t *testing.T) {
 	}
 	if !strings.Contains(got.String(), "hi") {
 		t.Fatalf("replay missing content: %q", got.String())
+	}
+}
+
+func TestParseChatDeltaPreservesSpaces(t *testing.T) {
+	delta, err := ParseChatDelta([]byte(`{"choices":[{"delta":{"reasoning_content":"The user said: hello","content":"a b"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta.Reasoning != "The user said: hello" {
+		t.Fatalf("reasoning=%q", delta.Reasoning)
+	}
+	if delta.Content != "a b" {
+		t.Fatalf("content=%q", delta.Content)
+	}
+}
+
+func TestPrepareChainCapsFailover(t *testing.T) {
+	candidates := make([]pool.Candidate, 0, 20)
+	for i := 0; i < 20; i++ {
+		candidates = append(candidates, pool.Candidate{ID: "a" + strconv.Itoa(i), Token: "t", Enabled: true, RequestCount: int64(i)})
+	}
+	_, chain, _, err := (&ChatService{Now: func() time.Time { return time.Unix(1000, 0) }}).prepareChain(
+		t.Context(),
+		ChatRequest{Model: "grok", Raw: map[string]any{"model": "grok"}},
+		candidates,
+		"least_used",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain) != defaultFailoverChain {
+		t.Fatalf("chain len=%d want %d", len(chain), defaultFailoverChain)
 	}
 }
