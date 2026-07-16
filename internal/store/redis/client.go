@@ -47,6 +47,31 @@ func (c *Client) VerifyAdminSession(token string) bool {
 	return true
 }
 
+// CreateAdminSession stores a Python-compatible admin session payload under
+// g2a:admin:sess:{token} with a 7-day TTL.
+func (c *Client) CreateAdminSession(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" || c == nil || strings.TrimSpace(c.URL) == "" {
+		return errors.New("redis admin session store unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	payload := fmt.Sprintf(`{"ts":%d}`, time.Now().Unix())
+	_, err := c.command(ctx, "SET", c.key("admin", "sess", token), payload, "EX", strconv.Itoa(adminSessionTTLSeconds))
+	return err
+}
+
+func (c *Client) DeleteAdminSession(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" || c == nil || strings.TrimSpace(c.URL) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := c.command(ctx, "DEL", c.key("admin", "sess", token))
+	return err
+}
+
 func (c *Client) key(parts ...string) string {
 	segments := []string{strings.Trim(c.Prefix, ":")}
 	for _, part := range parts {

@@ -33,6 +33,7 @@ type Config struct {
 	RedisPrefix            string
 	StoreBackend           string
 	LegacyAPIKey           string
+	LegacyAdminPassword    string
 	RequireAPIKey          string
 	RequireSharedStores    bool
 	RequireMigrations      bool
@@ -139,6 +140,7 @@ func Load() (Config, error) {
 		RedisPrefix:            envString("GROK2API_REDIS_PREFIX", defaultRedisPrefix),
 		StoreBackend:           storeBackend,
 		LegacyAPIKey:           envString("GROK2API_API_KEY", ""),
+		LegacyAdminPassword:    envString("GROK2API_ADMIN_PASSWORD", ""),
 		RequireAPIKey:          strings.ToLower(strings.TrimSpace(envString("GROK2API_REQUIRE_API_KEY", "auto"))),
 		RequireSharedStores:    requireShared,
 		RequireMigrations:      requireMigrations,

@@ -3,6 +3,11 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (c *Connector) PublicSettings(ctx context.Context) (map[string]any, error) {
@@ -137,4 +142,80 @@ func floatSetting(values map[string]any, key string, fallback float64) float64 {
 	default:
 		return fallback
 	}
+}
+
+type AdminPassword struct {
+	Hash string
+	Salt string
+}
+
+func (c *Connector) LoadAdminPassword(ctx context.Context) (AdminPassword, error) {
+	if c == nil || c.Pool == nil {
+		return AdminPassword{}, errors.New("postgres unavailable")
+	}
+	var data []byte
+	err := c.Pool.QueryRow(ctx, "SELECT value FROM app_settings WHERE key = 'admin_password'").Scan(&data)
+	if err != nil {
+		return AdminPassword{}, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return AdminPassword{}, err
+	}
+	hash, _ := raw["admin_password_hash"].(string)
+	salt, _ := raw["admin_password_salt"].(string)
+	return AdminPassword{Hash: strings.TrimSpace(hash), Salt: strings.TrimSpace(salt)}, nil
+}
+
+func (c *Connector) HasAdminPassword(ctx context.Context) (bool, error) {
+	pw, err := c.LoadAdminPassword(ctx)
+	if err != nil {
+		// missing row means setup needed
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pw.Hash != "" && pw.Salt != "", nil
+}
+
+func (c *Connector) SetAdminPassword(ctx context.Context, hash, salt string) error {
+	hash = strings.TrimSpace(hash)
+	salt = strings.TrimSpace(salt)
+	if hash == "" || salt == "" {
+		return errors.New("password hash/salt required")
+	}
+	payload := map[string]any{
+		"admin_password_hash":       hash,
+		"admin_password_salt":       salt,
+		"admin_password_updated_at": float64(time.Now().Unix()),
+		"admin_password_source":     "store",
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.Pool.Exec(ctx, `
+		INSERT INTO app_settings (key, value, updated_at)
+		VALUES ('admin_password', $1::jsonb, now())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+	`, encoded)
+	return err
+}
+
+func (c *Connector) SetSetting(ctx context.Context, key string, value any) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("setting key required")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = c.Pool.Exec(ctx, `
+		INSERT INTO app_settings (key, value, updated_at)
+		VALUES ($1, $2::jsonb, now())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+	`, key, encoded)
+	return err
 }

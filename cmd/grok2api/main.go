@@ -35,13 +35,13 @@ func main() {
 	var store *postgres.Connector
 	var adminSessions admin.SessionVerifier
 	var redisClient *redis.Client
-	if cfg.GoAdminRead || cfg.GoChat || cfg.GoMessages || cfg.GoResponses {
+	if cfg.GoAdminRead || cfg.GoAdminWrite || cfg.GoChat || cfg.GoMessages || cfg.GoResponses {
 		redisClient = redis.New(cfg.RedisURL, cfg.RedisPrefix)
 	}
-	if cfg.GoAdminRead {
+	if cfg.GoAdminRead || cfg.GoAdminWrite {
 		adminSessions = redisClient
 	}
-	if cfg.GoPublicRead || cfg.GoAdminRead || cfg.GoChat || cfg.GoMessages || cfg.GoResponses {
+	if cfg.GoPublicRead || cfg.GoAdminRead || cfg.GoAdminWrite || cfg.GoChat || cfg.GoMessages || cfg.GoResponses {
 		ctx, done := context.WithTimeout(context.Background(), 10*time.Second)
 		opened, err := postgres.Open(ctx, cfg.DatabaseURL)
 		done()
@@ -61,6 +61,7 @@ func main() {
 		StaticDir:         cfg.StaticDir,
 		PublicReadEnabled: cfg.GoPublicRead,
 		AdminReadEnabled:  cfg.GoAdminRead,
+		AdminWriteEnabled: cfg.GoAdminWrite,
 		ChatEnabled:       cfg.GoChat,
 		MessagesEnabled:   cfg.GoMessages,
 		ResponsesEnabled:  cfg.GoResponses,

@@ -288,3 +288,27 @@ curl -N -X POST "$BASE/v1/responses" \
 ```
 
 Expect headers `X-Grok2API-Protocol: openai_chat` / `openai_responses`, short failover chain (`Accounts` ~4), and stream terminal frames (`data: [DONE]` / `response.completed`).
+
+
+## Admin canary
+
+Admin routes are staged separately and default off:
+
+```bash
+GROK2API_RUNTIME=go
+GROK2API_GO_ADMIN_READ=1
+GROK2API_GO_ADMIN_WRITE=1
+```
+
+Supported now:
+
+- read: status/dashboard/keys/accounts/settings/models/logs/usage
+- auth: setup/login/session/logout (Redis session preferred, PG fallback)
+- write: keys create / patch / regenerate / delete
+
+Not yet in Go (stay on Python):
+
+- account import/register/kick/enable bulk ops
+- model-health controls
+- registration execution
+- full runtime settings patch surface beyond public read

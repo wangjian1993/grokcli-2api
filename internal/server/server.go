@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hm2899/grokcli-2api/internal/admin"
+	adminauth "github.com/hm2899/grokcli-2api/internal/admin/auth"
 	"github.com/hm2899/grokcli-2api/internal/auth"
 	"github.com/hm2899/grokcli-2api/internal/buildinfo"
 	"github.com/hm2899/grokcli-2api/internal/config"
@@ -35,6 +38,7 @@ type Options struct {
 	StaticDir         string
 	PublicReadEnabled bool
 	AdminReadEnabled  bool
+	AdminWriteEnabled bool
 	ChatEnabled       bool
 	MessagesEnabled   bool
 	ResponsesEnabled  bool
@@ -197,6 +201,30 @@ func NewMux(options Options) http.Handler {
 	})
 	mux.HandleFunc("GET /admin/api/usage/events", func(w http.ResponseWriter, r *http.Request) {
 		serveUsageEvents(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/setup", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminSetup(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/login", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminLogin(w, r, options)
+	})
+	mux.HandleFunc("GET /admin/api/session", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminSession(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/logout", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminLogout(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/keys", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminCreateKey(w, r, options)
+	})
+	mux.HandleFunc("PATCH /admin/api/keys/{key_id}", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminUpdateKey(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/keys/{key_id}/regenerate", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminRegenerateKey(w, r, options)
+	})
+	mux.HandleFunc("DELETE /admin/api/keys/{key_id}", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminDeleteKey(w, r, options)
 	})
 	return mux
 }
@@ -1341,9 +1369,15 @@ func serveAdminStatus(w http.ResponseWriter, r *http.Request, options Options, p
 		}
 	}
 	accounts := map[string]any{"account_count": accountCount, "active_count": pool.Live}
+	setupNeeded := false
+	if store != nil {
+		if has, err := store.HasAdminPassword(r.Context()); err == nil {
+			setupNeeded = !has
+		}
+	}
 	payload := map[string]any{
 		"ok":                   true,
-		"setup_needed":         false,
+		"setup_needed":         setupNeeded,
 		"version":              buildinfo.Version,
 		"store":                map[string]any{"backend": "hybrid", "postgres": store != nil},
 		"host":                 options.Config.Host,
@@ -1668,6 +1702,294 @@ func publicAPIBase(r *http.Request, port int) string {
 		}
 	}
 	return proto + "://" + host + "/v1"
+}
+
+func adminWriteAllowed(w http.ResponseWriter, r *http.Request, options Options) bool {
+	if !options.AdminWriteEnabled {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "Go admin write routes are not enabled"})
+		return false
+	}
+	if !options.AdminReadEnabled {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "Go admin read routes are not enabled"})
+		return false
+	}
+	if !isReady(options) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": readyReason(options)})
+		return false
+	}
+	if options.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "PostgreSQL store unavailable"})
+		return false
+	}
+	return true
+}
+
+func serveAdminSetup(w http.ResponseWriter, r *http.Request, options Options) {
+	if !adminWriteAllowed(w, r, options) {
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	password := stringValue(body["password"])
+	if len(password) < 4 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "password must contain at least 4 characters"})
+		return
+	}
+	has, err := options.Store.HasAdminPassword(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	if has {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "admin password already configured"})
+		return
+	}
+	hash, salt, err := adminauth.NewPassword(password)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if err := options.Store.SetAdminPassword(r.Context(), hash, salt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	token, err := createAdminSession(options)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	setAdminCookie(w, token)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "message": "Admin password created"})
+}
+
+func serveAdminLogin(w http.ResponseWriter, r *http.Request, options Options) {
+	if !options.AdminReadEnabled && !options.AdminWriteEnabled {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "Go admin routes are not enabled"})
+		return
+	}
+	if !isReady(options) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": readyReason(options)})
+		return
+	}
+	if options.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "PostgreSQL store unavailable"})
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	password := stringValue(body["password"])
+	ok, err := verifyAdminPassword(r.Context(), options, password)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Invalid admin password"})
+		return
+	}
+	token, err := createAdminSession(options)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	setAdminCookie(w, token)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token})
+}
+
+func serveAdminSession(w http.ResponseWriter, r *http.Request, options Options) {
+	if !options.AdminReadEnabled {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "Go admin read routes are not enabled"})
+		return
+	}
+	if !isReady(options) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": readyReason(options)})
+		return
+	}
+	token, ok := admin.RequireSession(r, options.AdminSessions)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "authenticated": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "authenticated": true, "token": token})
+}
+
+func serveAdminLogout(w http.ResponseWriter, r *http.Request, options Options) {
+	if !options.AdminReadEnabled && !options.AdminWriteEnabled {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "Go admin routes are not enabled"})
+		return
+	}
+	token := admin.ExtractSession(r)
+	if token != "" {
+		deleteAdminSession(options, token)
+	}
+	clearAdminCookie(w)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func serveAdminCreateKey(w http.ResponseWriter, r *http.Request, options Options) {
+	if !adminWriteAllowed(w, r, options) {
+		return
+	}
+	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	name := stringValue(body["name"])
+	note := stringValue(body["note"])
+	result, err := options.Store.CreateAPIKey(r.Context(), name, note)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+	payload := result.Record.PublicMap()
+	payload["secret"] = result.Secret
+	payload["key"] = result.Secret
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func serveAdminUpdateKey(w http.ResponseWriter, r *http.Request, options Options) {
+	if !adminWriteAllowed(w, r, options) {
+		return
+	}
+	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
+		return
+	}
+	id := r.PathValue("key_id")
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	var name, note *string
+	var enabled *bool
+	if v, ok := body["name"].(string); ok {
+		name = &v
+	}
+	if v, ok := body["note"].(string); ok {
+		note = &v
+	}
+	if v, ok := body["enabled"].(bool); ok {
+		enabled = &v
+	}
+	rec, err := options.Store.UpdateAPIKey(r.Context(), id, name, note, enabled)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec.PublicMap())
+}
+
+func serveAdminRegenerateKey(w http.ResponseWriter, r *http.Request, options Options) {
+	if !adminWriteAllowed(w, r, options) {
+		return
+	}
+	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
+		return
+	}
+	result, err := options.Store.RegenerateAPIKey(r.Context(), r.PathValue("key_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	payload := result.Record.PublicMap()
+	payload["secret"] = result.Secret
+	payload["key"] = result.Secret
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func serveAdminDeleteKey(w http.ResponseWriter, r *http.Request, options Options) {
+	if !adminWriteAllowed(w, r, options) {
+		return
+	}
+	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
+		return
+	}
+	ok, err := options.Store.DeleteAPIKey(r.Context(), r.PathValue("key_id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "api key not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func verifyAdminPassword(ctx context.Context, options Options, password string) (bool, error) {
+	if options.Store == nil {
+		return false, errors.New("store unavailable")
+	}
+	pw, err := options.Store.LoadAdminPassword(ctx)
+	if err == nil && pw.Hash != "" && pw.Salt != "" {
+		return adminauth.VerifyPassword(password, pw.Hash, pw.Salt), nil
+	}
+	// bootstrap via env password only when no store hash exists
+	envPW := strings.TrimSpace(options.Config.LegacyAdminPassword)
+	if envPW == "" {
+		// fallback common env already loaded? use os.Getenv for ADMIN_PASSWORD
+		envPW = strings.TrimSpace(os.Getenv("GROK2API_ADMIN_PASSWORD"))
+	}
+	if envPW != "" && subtle.ConstantTimeCompare([]byte(password), []byte(envPW)) == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func createAdminSession(options Options) (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(buf)
+	// Prefer Redis session store (Python path), fall back to Postgres sessions map.
+	if rc, ok := options.AdminSessions.(interface{ CreateAdminSession(string) error }); ok {
+		if err := rc.CreateAdminSession(token); err == nil {
+			return token, nil
+		}
+	}
+	if options.Store != nil {
+		if err := options.Store.CreateAdminSession(token); err != nil {
+			return "", err
+		}
+		return token, nil
+	}
+	return "", errors.New("no admin session store available")
+}
+
+func deleteAdminSession(options Options, token string) {
+	if rc, ok := options.AdminSessions.(interface{ DeleteAdminSession(string) error }); ok {
+		_ = rc.DeleteAdminSession(token)
+	}
+	if options.Store != nil {
+		_ = options.Store.DeleteAdminSession(token)
+	}
+}
+
+func setAdminCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     admin.AdminCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+	})
+}
+
+func clearAdminCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: admin.AdminCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 }
 
 func serveAdminPage(w http.ResponseWriter, r *http.Request, staticDir, page string) {
