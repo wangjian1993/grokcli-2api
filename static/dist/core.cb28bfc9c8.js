@@ -53,6 +53,7 @@ window.G2A = window.G2A || {};
   let accountsSort = "newest";
   // "" | "1" | "0" — server-side has_sso filter
   let accountsSsoFilter = "";
+  // "" | live|cooldown|disabled|quota_disabled|model_blocked|expired
   let accountsStatusFilter = "";
   let selectedAccountIds = new Set();
   function syncToken() { token = (window.G2A && G2A.getToken) ? G2A.getToken() : token; }
@@ -649,25 +650,6 @@ function rebindPageControls() {
       accountsSort = ($("acc-sort").value || "newest");
       try { localStorage.setItem("g2a_accounts_sort", accountsSort); } catch (_) {}
       accountsPage = 1;
-      loadAccountsPage({ reset: true });
-    };
-  }
-  if ($("acc-filter-status")) {
-    try {
-      const savedStatus = localStorage.getItem("g2a_accounts_status_filter");
-      if (savedStatus != null) {
-        accountsStatusFilter = savedStatus || "";
-        $("acc-filter-status").value = accountsStatusFilter;
-      } else {
-        accountsStatusFilter = $("acc-filter-status").value || "";
-      }
-    } catch (_) {
-      accountsStatusFilter = $("acc-filter-status").value || "";
-    }
-    $("acc-filter-status").onchange = () => {
-      accountsStatusFilter = ($("acc-filter-status").value || "");
-      try { localStorage.setItem("g2a_accounts_status_filter", accountsStatusFilter); } catch (_) {}
-      try { renderAccountStatusChips(); } catch (_) {}
       loadAccountsPage({ reset: true });
     };
   }
@@ -1311,10 +1293,6 @@ function fmtQuotaCell(p, liveQuota) {
 }
 
 
-function accountStatusFilterLabel(key) {
-  const hit = ACCOUNT_STATUS_FILTERS.find((x) => x.key === (key || ""));
-  return hit ? hit.label : (key || "");
-}
 
 const ACCOUNT_STATUS_FILTERS = [
   { key: "", label: "全部", tone: "" },
@@ -1395,7 +1373,6 @@ async function selectAllFilteredAccounts() {
   }
 }
 
-
 function getFilteredAccounts() {
   // Server-side filtering/pagination: accountsList holds current page rows.
   return accountsList.slice();
@@ -1407,10 +1384,18 @@ function updateAccountSelectionInfo(filteredCount, pageCount) {
   if (!el) return;
   const selected = selectedAccountIds.size;
   const q = (accountsSearchQuery || "").trim();
+  const st = (accountsStatusFilter || "").trim();
   const total = accountsTotal || accountsList.length;
-  el.textContent = q
-    ? `已选 ${selected} 个 · 匹配 ${total} · 本页 ${pageCount}`
-    : `已选 ${selected} 个 · 全部 ${total} · 本页 ${pageCount}`;
+  const stLabel = (typeof accountStatusFilterLabel === "function") ? accountStatusFilterLabel(st) : st;
+  const bits = [`已选 ${selected} 个`];
+  if (q || st || accountsSsoFilter) bits.push(`筛选 ${total}`);
+  else bits.push(`全部 ${total}`);
+  bits.push(`本页 ${pageCount}`);
+  if (stLabel && st) bits.push(`状态:${stLabel}`);
+  if (accountsSsoFilter === "1") bits.push("有SSO");
+  if (accountsSsoFilter === "0") bits.push("无SSO");
+  if (q) bits.push(`关键词:${q}`);
+  el.textContent = bits.join(" · ");
   const pageCheck = $("acc-check-page");
   if (pageCheck) {
     const pageIds = Array.from(document.querySelectorAll(".acc-check-one")).map(x => x.dataset.id);
@@ -1573,6 +1558,7 @@ async function loadAccountsPage({ reset = false } = {}) {
       "store", window.__g2aAccountsStore.source
     );
     accountsLoading = false;
+    try { renderAccountStatusChips(); } catch (_) {}
     renderAccountsPage();
     hydrateQuotaCacheFromDB();
   } catch (e) {
@@ -2065,6 +2051,7 @@ if ($("btn-acc-export-selected")) $("btn-acc-export-selected").onclick = () => e
 if ($("acc-check-page")) {
   on("acc-check-page", "onchange", (e) => setPageSelection(!!e.target.checked));
 }
+
 
 function poolStatusLabel(a, p) {
   const enabled = p.enabled !== false;
@@ -4923,6 +4910,20 @@ async function runJsonExportJob({ mode = "all", ids = [], buttonId = "btn-export
     } else {
       started = await api("/accounts/export?async_job=1");
     }
+    // Sync fallback for older servers: if payload returned directly, download it.
+    if (started && started.auth && !started.job_id) {
+      const blob = new Blob([JSON.stringify(started, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = mode === "selected"
+        ? `grok2api-auth-export-selected-${selectedN}.json`
+        : "grok2api-auth-export.json";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      setJsonIoProgress({ percent: 100, label: "导出完成", detail: a.download, done: started.count || selectedN || 0, total: started.count || selectedN || 0, success: started.count || 0, fail: 0, status: "done" });
+      toast(`已导出 ${started.count || selectedN || ""} 个账号`);
+      return;
+    }
     const jobId = started && started.job_id;
     if (!jobId) throw new Error("未返回 job_id，无法跟踪导出进度");
     setJsonIoProgress({
@@ -7299,3 +7300,4 @@ window.G2AAdmin = { bootstrap, loadDashboard, api, $, toast, PAGE_META, renderAc
   }
 })();
 /* g2a-cache-bust-20260715-reg-restore-fix */
+
