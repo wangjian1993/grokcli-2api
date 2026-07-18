@@ -60,7 +60,7 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "additionalProperties": false,
+        "additionalProperties": true,
         "required": [
           "method",
           "paths",
@@ -86,13 +86,19 @@
           "protocol": {
             "type": "string",
             "minLength": 1
+          },
+          "go_phase": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
           }
         }
       }
     },
     "authentication": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": [
         "headers",
         "precedence"
@@ -124,7 +130,7 @@
     },
     "failover": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": [
         "allowed",
         "forbidden"
