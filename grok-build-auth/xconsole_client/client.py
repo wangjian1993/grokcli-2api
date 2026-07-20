@@ -42,9 +42,11 @@ import http.cookiejar
 import io
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -200,10 +202,25 @@ class XConsoleAuthClient:
         try:
             self._scrape_rsc_payload(html)
         except Exception as exc:
+            # Persist the raw HTML so a developer can diagnose page-structure
+            # changes without having to reproduce the request.  Kept under
+            # /tmp so it doesn't bloat the repo.
+            try:
+                diag_path = Path("/tmp") / f"xconsole-signup-html-{int(time.time())}.html"
+                diag_path.write_text(html, encoding="utf-8", errors="replace")
+            except Exception:
+                diag_path = None  # best-effort, never mask the original error
             raise RuntimeError(
                 "Failed to extract next-action / next-router-state-tree from the "
                 "live sign-up page.  The x.ai deployment may have changed its "
-                "page structure.  Details: %s" % exc
+                "page structure.  Details: %s%s"
+                % (
+                    exc,
+                    (
+                        f"\nRaw sign-up HTML dumped to: {diag_path}"
+                        if diag_path else ""
+                    ),
+                )
             ) from exc
 
         # scrape live Turnstile sitekey (config constant can go stale)
@@ -363,6 +380,18 @@ class XConsoleAuthClient:
             else:
                 rest.append(url)
         ordered = priority + rest
+
+        # 2a. No JS chunks at all? Don't enter ThreadPoolExecutor(max_workers=0)
+        # (Python raises ``ValueError: max_workers must be greater than 0``).
+        # Surface a clear error so the caller can tell the main RSC scrape
+        # failure apart from "page has no Next.js chunks to scan".
+        if not ordered:
+            raise RuntimeError(
+                "Could not find any /_next/static/chunks/*.js references in the "
+                "sign-up page HTML.  The x.ai deployment may have changed its "
+                "page structure (no Next.js chunks on the live page).  "
+                "As a workaround, manually set NEXT_ACTION_SIGNUP in config.py."
+            )
 
         # 3. fetch chunks in parallel and search for action hashes.
         # We collect ALL results and pick the best one (sign-up chunk > any).

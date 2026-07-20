@@ -18,6 +18,8 @@ Captcha browser pool itself is the sibling process turnstile-solver
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import os
 import secrets
 import sys
@@ -41,7 +43,32 @@ else:
     _IMPORT_ERROR = None
 
 
-app = FastAPI(title="grok2api registration internal API", version="1.0.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Auto-replenish runs in this sidecar (has registration adapter + PG/Redis).
+    try:
+        from grok2api.pool import account_replenisher
+
+        account_replenisher.start_background()
+        print("  [registration-sidecar] auto replenish started", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [registration-sidecar] auto replenish start failed: {exc}", flush=True)
+    try:
+        yield
+    finally:
+        try:
+            from grok2api.pool import account_replenisher
+
+            account_replenisher.stop_background()
+        except Exception:
+            pass
+
+
+app = FastAPI(
+    title="grok2api registration internal API",
+    version="1.0.0",
+    lifespan=_lifespan,
+)
 API_PREFIX = "/internal/registration/v1"
 
 
@@ -474,6 +501,43 @@ def sso_import_job(job_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="SSO import job not found")
     return ar._sso_public_job(job)
 
+
+
+
+@app.get(f"{API_PREFIX}/auto-replenish/status")
+def auto_replenish_status(request: Request, light: int = 0) -> dict[str, Any]:
+    _require_auth(request)
+    from grok2api.pool import account_replenisher
+
+    return account_replenisher.status(light=bool(light))
+
+
+@app.post(f"{API_PREFIX}/auto-replenish/run")
+def auto_replenish_run(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    from grok2api.pool import account_replenisher
+
+    result = account_replenisher.run_once(source="manual")
+    return {"ok": True, **result}
+
+
+@app.post(f"{API_PREFIX}/auto-replenish/start")
+def auto_replenish_start(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    from grok2api.pool import account_replenisher
+
+    account_replenisher.start_background()
+    account_replenisher.request_run_soon()
+    return {"ok": True, **account_replenisher.status(light=True)}
+
+
+@app.post(f"{API_PREFIX}/auto-replenish/stop")
+def auto_replenish_stop(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    from grok2api.pool import account_replenisher
+
+    account_replenisher.stop_background()
+    return {"ok": True, **account_replenisher.status(light=True)}
 
 @app.exception_handler(HTTPException)
 async def http_error_handler(_: Request, exc: HTTPException) -> JSONResponse:

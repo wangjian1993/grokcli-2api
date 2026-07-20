@@ -2167,14 +2167,79 @@ def disable_for_quota(
     *,
     reason: str = "额度已耗尽",
     source: str = "billing",
+    hard_delete: bool = True,
 ) -> dict[str, Any] | None:
-    """Disable account permanently from rotation due to quota exhaustion."""
+    """Remove account from the pool when quota is exhausted.
+
+    Default ``hard_delete=True``: drop credentials + pool row so quota-dead
+    accounts never linger in totals or rotation. Soft-disable is only used
+    when hard_delete is explicitly False (legacy/tests).
+    """
+    if not account_id:
+        return None
+    reason_s = (reason or "额度已耗尽")[:300]
+    now = _now()
+
+    if hard_delete:
+        removed = False
+        try:
+            from grok2api.pool.accounts import remove_account
+
+            removed = bool(remove_account(account_id))
+        except Exception:
+            removed = False
+        if not removed:
+            # Fallback: try soft mark then force-delete via auth map path.
+            try:
+                from grok2api.upstream.oidc_auth import mark_refresh_invalid
+
+                res = mark_refresh_invalid(
+                    account_id,
+                    reason=f"quota_disabled: {reason_s}",
+                    hard_delete=True,
+                )
+                removed = bool((res or {}).get("deleted"))
+            except Exception:
+                removed = False
+        try:
+            from grok2api.store.pool_redis import clear_cooldown
+
+            clear_cooldown(account_id)
+        except Exception:
+            pass
+        try:
+            import grok2api.pool.conversation_affinity as _aff
+
+            _aff.clear_affinity_for_account(account_id)
+        except Exception:
+            pass
+        try:
+            invalidate_pool_summary_cache()
+        except Exception:
+            pass
+        print(
+            f"  [quota] account HARD-deleted (额度禁用): "
+            f"{account_id} — {reason_s} removed={removed}",
+            flush=True,
+        )
+        return {
+            "id": account_id,
+            "deleted": bool(removed),
+            "hard_delete": True,
+            "enabled": False,
+            "disabled_for_quota": True,
+            "disabled_reason": reason_s,
+            "quota_source": source,
+            "quota_disabled_at": now,
+            "pool_status": None,
+            "summary": f"额度耗尽 · 已删除账号（{reason_s}）",
+        }
+
+    # Soft path (legacy): keep credentials, mark out of rotation.
     meta = get_account_pool_meta(account_id) or {}
     if not isinstance(meta, dict):
         meta = {}
     already = meta.get("enabled") is False and meta.get("disabled_for_quota")
-    reason_s = (reason or "额度已耗尽")[:300]
-    now = _now()
     saved = patch_account_pool_meta(
         account_id,
         {
@@ -2184,6 +2249,7 @@ def disable_for_quota(
             "disabled_source": source,
             "quota_disabled_at": now,
             "quota_source": source,
+            "pool_status": "quota_disabled",
             "last_error": reason_s,
             "last_quota": {
                 "ok": True,
@@ -2215,9 +2281,69 @@ def disable_for_quota(
             "enabled": False,
             "disabled_for_quota": True,
             "disabled_reason": reason_s,
+            "hard_delete": False,
         }
     )
     return out
+
+
+def purge_quota_disabled_accounts(*, limit: int = 500) -> dict[str, Any]:
+    """Hard-delete accounts already marked 额度禁用 (legacy soft-disabled rows)."""
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+    scanned = 0
+    try:
+        accounts = list_pool_accounts()
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "deleted": 0,
+            "scanned": 0,
+            "error": str(e)[:200],
+        }
+    for a in accounts:
+        if len(deleted) >= max(1, int(limit or 500)):
+            break
+        if not isinstance(a, dict):
+            continue
+        scanned += 1
+        aid = str(a.get("id") or "").strip()
+        if not aid:
+            continue
+        status = str(a.get("pool_status") or "").strip().lower()
+        if not (
+            bool(a.get("disabled_for_quota"))
+            or status == "quota_disabled"
+        ):
+            continue
+        try:
+            res = disable_for_quota(
+                aid,
+                reason=str(a.get("disabled_reason") or "额度已耗尽 · 清理残留")[:300],
+                source=str(a.get("quota_source") or a.get("disabled_source") or "purge"),
+                hard_delete=True,
+            )
+            if res and (res.get("deleted") or res.get("hard_delete")):
+                deleted.append(aid)
+        except Exception as e:  # noqa: BLE001
+            errors.append({"id": aid, "error": str(e)[:160]})
+    if deleted:
+        try:
+            invalidate_pool_summary_cache()
+        except Exception:
+            pass
+        print(
+            f"  [quota] purged quota-disabled accounts: "
+            f"deleted={len(deleted)} scanned={scanned}",
+            flush=True,
+        )
+    return {
+        "ok": True,
+        "deleted": len(deleted),
+        "deleted_ids": deleted[:50],
+        "scanned": scanned,
+        "errors": errors[:20],
+    }
 
 
 def save_quota_snapshot(account_id: str, quota_result: dict[str, Any]) -> None:
@@ -2255,16 +2381,35 @@ def save_quota_snapshot(account_id: str, quota_result: dict[str, Any]) -> None:
     # drop Nones for compact JSON
     snap = {k: v for k, v in snap.items() if v is not None}
     patch: dict[str, Any] = {"last_quota": snap}
-    # keep disable flags coherent when exhausted / recovered
+    # Exhausted → hard-delete (quota-dead accounts must not linger).
+    # Healthy → re-enter only if a soft-disabled legacy row still exists.
     if snap.get("exhausted") or snap.get("auto_disabled"):
-        patch.update({
-            "disabled_for_quota": True,
-            "enabled": False,
-            "disabled_reason": (snap.get("exhaust_reason") or snap.get("summary") or "额度已耗尽")[:300],
-            "quota_disabled_at": snap.get("fetched_at") or _now(),
-            "quota_source": "billing",
-            "pool_status": "quota_disabled",
-        })
+        reason = (
+            snap.get("exhaust_reason")
+            or snap.get("summary")
+            or "额度已耗尽"
+        )
+        try:
+            disable_for_quota(
+                account_id,
+                reason=str(reason)[:300],
+                source=str(snap.get("source") or "billing"),
+                hard_delete=True,
+            )
+        except Exception:
+            # Fallback soft mark if delete path fails mid-flight.
+            patch.update({
+                "disabled_for_quota": True,
+                "enabled": False,
+                "disabled_reason": str(reason)[:300],
+                "quota_disabled_at": snap.get("fetched_at") or _now(),
+                "quota_source": "billing",
+                "pool_status": "quota_disabled",
+            })
+            patch_account_pool_meta(account_id, patch)
+            if patch.get("enabled") is True:
+                invalidate_pool_summary_cache()
+        return
     elif snap.get("ok") and not snap.get("exhausted"):
         # Healthy billing snapshot: re-enter rotation if we previously hard-disabled
         # this account for quota/billing reasons.

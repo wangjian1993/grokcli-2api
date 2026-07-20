@@ -120,7 +120,21 @@ a:hover { color: var(--ant-color-primary-hover); }
   color: #fff; background: var(--ant-color-primary);
   box-shadow: 0 2px 8px rgba(22,119,255,.35);
 }
-.g2a-menu-ico { width: 18px; text-align: center; opacity: .95; }
+.g2a-menu-ico {
+  width: 20px; height: 20px; display: inline-grid; place-items: center;
+  text-align: center; opacity: .95; font-size: 13px; flex: 0 0 auto;
+}
+.g2a-menu-ico .g2a-ico,
+.g2a-ico {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex: 0 0 auto;
+}
+.g2a-menu-item .g2a-ico { opacity: .88; }
+.g2a-menu-item:hover .g2a-ico,
+.g2a-menu-item.is-active .g2a-ico { opacity: 1; }
+
 .g2a-sider-foot {
   padding: 12px; border-top: 1px solid rgba(255,255,255,.08);
   display: flex; flex-direction: column; gap: 6px;

@@ -612,6 +612,34 @@ function rebindPageControls() {
       toast("已重新加载设置");
     } catch (e) { toast(e.message || "加载失败", false); }
   });
+  on("btn-auto-replenish-run", "onclick", async () => {
+    const btn = $("btn-auto-replenish-run");
+    try {
+      if (typeof setBusy === "function") setBusy(btn, true, "检查中…");
+      else if (btn) { btn.disabled = true; }
+      const r = await api("/auto-replenish/run", { method: "POST", body: "{}" });
+      if (statusCache) statusCache.auto_replenish = Object.assign({}, statusCache.auto_replenish || {}, r);
+      if (dashCache) dashCache.auto_replenish = Object.assign({}, dashCache.auto_replenish || {}, r);
+      try {
+        const s = (dashCache && dashCache.settings) || (statusCache && statusCache.settings) || {};
+        updateAutoReplenishPill(Object.assign({}, s, {
+          auto_replenish_enabled: r.enabled != null ? r.enabled : s.auto_replenish_enabled,
+        }));
+      } catch (_) {}
+      if (r.triggered) toast("已触发自动补号");
+      else if (r.skipped === "above_threshold") toast("可轮询账号充足，无需补号");
+      else if (r.skipped === "registration_busy") toast("已有注册任务进行中", false);
+      else if (r.skipped === "disabled") toast("自动补号未启用", false);
+      else if (r.skipped === "start_failed") toast((r.result && r.result.error) || "启动注册失败", false);
+      else toast(r.skipped ? ("已跳过：" + r.skipped) : "检查完成");
+    } catch (e) {
+      toast(e.message || "检查失败", false);
+    } finally {
+      if (typeof setBusy === "function") setBusy(btn, false);
+      else if (btn) { btn.disabled = false; }
+    }
+  });
+
   on("btn-save-settings", "onclick", async () => {
     try { await saveSystemSettings(); } catch (e) { toast(e.message || "保存失败", false); }
   });
@@ -6792,12 +6820,71 @@ function bindSub2apiUi() {
 try { bindSub2apiUi(); } catch (_) {}
 
 /* ── System settings page ───────────────────────────── */
+function updateAutoReplenishPill(s) {
+  const pill = $("auto-replenish-pill");
+  const hint = $("auto-replenish-hint");
+  if (!pill && !hint) return;
+  const enabled = !!(s && s.auto_replenish_enabled);
+  const minN = (s && s.auto_replenish_min_accounts != null) ? s.auto_replenish_min_accounts : 50;
+  const cnt = (s && s.auto_replenish_count != null) ? s.auto_replenish_count : 5;
+  const ar = (statusCache && statusCache.auto_replenish)
+    || (dashCache && dashCache.auto_replenish)
+    || null;
+  if (pill) {
+    if (!enabled) {
+      pill.textContent = "已关闭";
+      pill.className = "g2a-tag";
+    } else if (ar && (ar.running || ar.cluster_running || ar.leader_running)) {
+      pill.textContent = "● 运行中 · 阈值 " + minN;
+      pill.className = "g2a-tag ok";
+    } else {
+      pill.textContent = "已启用 · 阈值 " + minN;
+      pill.className = "g2a-tag blue";
+    }
+  }
+  if (hint) {
+    const last = ar && ar.last;
+    if (last && last.at) {
+      const when = (typeof fmtTime === "function") ? fmtTime(last.at) : "";
+      if (last.triggered) {
+        hint.textContent = "上次：已触发补号 " + (last.replenish_count || cnt) + " 个" + (when ? " · " + when : "");
+      } else if (last.skipped) {
+        const map = {
+          disabled: "已关闭",
+          above_threshold: "可轮询账号充足",
+          registration_busy: "注册进行中，跳过",
+          cooldown: "冷却中",
+          start_failed: "启动失败",
+        };
+        hint.textContent = "上次检查：" + (map[last.skipped] || last.skipped)
+          + (last.rotatable_count != null ? "（可轮询 " + last.rotatable_count + (last.account_count != null ? "/" + last.account_count : "") + "）" : (last.account_count != null ? "（账号 " + last.account_count + "）" : ""))
+          + (when ? " · " + when : "");
+      } else {
+        hint.textContent = "可轮询低于 " + minN + " 时自动注册 " + cnt + " 个";
+      }
+    } else {
+      hint.textContent = "可轮询低于 " + minN + " 时自动注册 " + cnt + " 个（使用账号页注册配置）";
+    }
+  }
+}
+
 function fillSystemSettingsForm(s) {
   s = s || {};
   if ($("set-account-mode") && s.account_mode) $("set-account-mode").value = s.account_mode;
   if ($("set-default-model")) $("set-default-model").value = s.default_model || "";
   if ($("set-token-maintain")) $("set-token-maintain").checked = s.token_maintain_enabled !== false;
   if ($("set-model-health")) $("set-model-health").checked = s.model_health_enabled !== false;
+  if ($("set-auto-replenish")) $("set-auto-replenish").checked = !!s.auto_replenish_enabled;
+  if ($("set-auto-replenish-min") && s.auto_replenish_min_accounts != null) {
+    $("set-auto-replenish-min").value = s.auto_replenish_min_accounts;
+  }
+  if ($("set-auto-replenish-count") && s.auto_replenish_count != null) {
+    $("set-auto-replenish-count").value = s.auto_replenish_count;
+  }
+  if ($("set-auto-replenish-interval") && s.auto_replenish_interval_sec != null) {
+    $("set-auto-replenish-interval").value = s.auto_replenish_interval_sec;
+  }
+  try { updateAutoReplenishPill(s); } catch (_) {}
   if ($("set-model-health-auto-disable")) {
     $("set-model-health-auto-disable").checked = s.model_health_auto_disable !== false;
   }
@@ -6939,6 +7026,16 @@ function collectSystemSettingsPatch() {
   if ($("set-default-model")) patch.default_model = ($("set-default-model").value || "").trim();
   if ($("set-token-maintain")) patch.token_maintain_enabled = !!$("set-token-maintain").checked;
   if ($("set-model-health")) patch.model_health_enabled = !!$("set-model-health").checked;
+  if ($("set-auto-replenish")) patch.auto_replenish_enabled = !!$("set-auto-replenish").checked;
+  if ($("set-auto-replenish-min") && $("set-auto-replenish-min").value !== "") {
+    patch.auto_replenish_min_accounts = Number($("set-auto-replenish-min").value);
+  }
+  if ($("set-auto-replenish-count") && $("set-auto-replenish-count").value !== "") {
+    patch.auto_replenish_count = Number($("set-auto-replenish-count").value);
+  }
+  if ($("set-auto-replenish-interval") && $("set-auto-replenish-interval").value !== "") {
+    patch.auto_replenish_interval_sec = Number($("set-auto-replenish-interval").value);
+  }
   if ($("set-model-health-auto-disable")) {
     patch.model_health_auto_disable = !!$("set-model-health-auto-disable").checked;
   }

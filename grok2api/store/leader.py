@@ -89,6 +89,13 @@ def _start_maintainers_if_needed() -> None:
         print("  [leader] model health started", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"  [leader] model health start failed: {e}", flush=True)
+    try:
+        import grok2api.pool.account_replenisher as account_replenisher
+
+        account_replenisher.start_background()
+        print("  [leader] auto replenish started", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [leader] auto replenish start failed: {e}", flush=True)
 
 
 def _stop_maintainers_if_needed() -> None:
@@ -108,6 +115,12 @@ def _stop_maintainers_if_needed() -> None:
         import grok2api.pool.model_health as model_health
 
         model_health.stop_background()
+    except Exception:
+        pass
+    try:
+        import grok2api.pool.account_replenisher as account_replenisher
+
+        account_replenisher.stop_background()
     except Exception:
         pass
     print("  [leader] maintainers stopped (lost leadership)", flush=True)

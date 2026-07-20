@@ -65,6 +65,10 @@ _PG_SCALAR_KEYS = (
     "account_mode",
     "token_maintain_enabled",
     "model_health_enabled",
+    "auto_replenish_enabled",
+    "auto_replenish_min_accounts",
+    "auto_replenish_count",
+    "auto_replenish_interval_sec",
     "reasoning_compat",
     "outbound_max_tools",
     "outbound_max_tools_openai",
@@ -1653,6 +1657,134 @@ def set_model_health_auto_disable(enabled: bool) -> bool:
     return val
 
 
+# ── Auto replenish (account pool top-up via protocol registration) ─────────
+
+def get_auto_replenish_enabled() -> bool:
+    """Default off — requires explicit admin enable + valid registration config."""
+    return _get_feature_flag("auto_replenish_enabled", "GROK2API_AUTO_REPLENISH", False)
+
+
+def set_auto_replenish_enabled(enabled: bool) -> bool:
+    val = _set_feature_flag("auto_replenish_enabled", enabled)
+    try:
+        import grok2api.pool.account_replenisher as account_replenisher
+        if val:
+            try:
+                from grok2api.store.leader import is_leader, should_start_maintainers, try_become_leader
+                can = is_leader() or should_start_maintainers() or try_become_leader()
+            except Exception:
+                can = True
+            if can:
+                account_replenisher.start_background()
+                account_replenisher.request_run_soon()
+            else:
+                try:
+                    from grok2api.store.redis_client import key, redis_enabled, set_ex
+                    if redis_enabled():
+                        set_ex(key("flag", "auto_replenish_on"), "1", 60)
+                except Exception:
+                    pass
+        else:
+            account_replenisher.stop_background()
+            try:
+                from grok2api.store.redis_client import delete, key, redis_enabled
+                if redis_enabled():
+                    delete(key("flag", "auto_replenish_on"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return val
+
+
+def get_auto_replenish_min_accounts() -> int:
+    raw = _get_setting_value("auto_replenish_min_accounts", None)
+    if raw is None:
+        try:
+            import os
+            return max(0, int(os.getenv("GROK2API_AUTO_REPLENISH_MIN", "50")))
+        except Exception:
+            return 50
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 50
+    return max(0, min(100_000, v))
+
+
+def set_auto_replenish_min_accounts(value: int | str) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("auto_replenish_min_accounts 必须是整数 0–100000") from e
+    v = max(0, min(100_000, v))
+    _set_setting_value("auto_replenish_min_accounts", v)
+    try:
+        import grok2api.pool.account_replenisher as account_replenisher
+        if hasattr(account_replenisher, "request_run_soon"):
+            account_replenisher.request_run_soon()
+    except Exception:
+        pass
+    return v
+
+
+def get_auto_replenish_count() -> int:
+    raw = _get_setting_value("auto_replenish_count", None)
+    if raw is None:
+        try:
+            import os
+            return max(1, int(os.getenv("GROK2API_AUTO_REPLENISH_COUNT", "5")))
+        except Exception:
+            return 5
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 5
+    return max(1, min(10_000, v))
+
+
+def set_auto_replenish_count(value: int | str) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("auto_replenish_count 必须是整数 1–10000") from e
+    v = max(1, min(10_000, v))
+    _set_setting_value("auto_replenish_count", v)
+    return v
+
+
+def get_auto_replenish_interval_sec() -> float:
+    raw = _get_setting_value("auto_replenish_interval_sec", None)
+    if raw is None:
+        try:
+            import os
+            return max(30.0, float(os.getenv("GROK2API_AUTO_REPLENISH_INTERVAL", "120")))
+        except Exception:
+            return 120.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 120.0
+    return max(30.0, min(86_400.0, v))
+
+
+def set_auto_replenish_interval_sec(value: float | str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError("auto_replenish_interval_sec 必须是数字 30–86400") from e
+    v = max(30.0, min(86_400.0, v))
+    _set_setting_value("auto_replenish_interval_sec", v)
+    try:
+        import grok2api.pool.account_replenisher as account_replenisher
+        if hasattr(account_replenisher, "request_run_soon"):
+            account_replenisher.request_run_soon()
+    except Exception:
+        pass
+    return v
+
+
+
 def _parse_probe_models(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -3236,6 +3368,14 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
         set_token_maintain_enabled(bool(patch["token_maintain_enabled"]))
     if "model_health_enabled" in patch and patch["model_health_enabled"] is not None:
         set_model_health_enabled(bool(patch["model_health_enabled"]))
+    if "auto_replenish_enabled" in patch and patch["auto_replenish_enabled"] is not None:
+        set_auto_replenish_enabled(bool(patch["auto_replenish_enabled"]))
+    if "auto_replenish_min_accounts" in patch and patch["auto_replenish_min_accounts"] is not None:
+        set_auto_replenish_min_accounts(patch["auto_replenish_min_accounts"])
+    if "auto_replenish_count" in patch and patch["auto_replenish_count"] is not None:
+        set_auto_replenish_count(patch["auto_replenish_count"])
+    if "auto_replenish_interval_sec" in patch and patch["auto_replenish_interval_sec"] is not None:
+        set_auto_replenish_interval_sec(patch["auto_replenish_interval_sec"])
     # Pool rotation / cooldown policy (nested or flat)
     pool_keys = (
         "cooldown_default_sec",
@@ -3349,6 +3489,10 @@ def get_public_settings() -> dict[str, Any]:
         "admin_password_in_store": _stored_admin_hash_present(),
         "token_maintain_enabled": get_token_maintain_enabled(),
         "model_health_enabled": get_model_health_enabled(),
+        "auto_replenish_enabled": get_auto_replenish_enabled(),
+        "auto_replenish_min_accounts": get_auto_replenish_min_accounts(),
+        "auto_replenish_count": get_auto_replenish_count(),
+        "auto_replenish_interval_sec": get_auto_replenish_interval_sec(),
         "reasoning_compat": get_reasoning_compat(),
         "reasoning_compat_options": list(_VALID_REASONING),
         "outbound_max_tools": get_outbound_max_tools(),

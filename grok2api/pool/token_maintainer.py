@@ -320,6 +320,20 @@ def run_once(*, force: bool = False) -> dict[str, Any]:
                     "disabled": 0,
                     "error": str(e)[:200],
                 }
+            # Hard-delete leftover 额度禁用 accounts (soft-disabled legacy rows).
+            try:
+                from grok2api.pool import account_pool as _ap
+
+                if hasattr(_ap, "purge_quota_disabled_accounts"):
+                    qpurge = _ap.purge_quota_disabled_accounts(limit=500)
+                    result["purged_quota_disabled"] = qpurge
+                else:
+                    result["purged_quota_disabled"] = {"deleted": 0, "skipped": "unavailable"}
+            except Exception as e:  # noqa: BLE001
+                result["purged_quota_disabled"] = {
+                    "deleted": 0,
+                    "error": str(e)[:200],
+                }
             # Adaptive skew + batch: large pools pre-warm earlier and drain near-expiry
             # waves faster, without one-shot rewriting the entire pool.
             pre_stats = _remaining_stats(force=True)

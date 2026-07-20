@@ -306,10 +306,11 @@ def maybe_disable_from_quota_result(result: dict[str, Any]) -> dict[str, Any]:
             account_id, reason=reason, source="billing"
         )
         result["auto_disabled"] = True
+        result["auto_deleted"] = bool((disabled or {}).get("deleted") or (disabled or {}).get("hard_delete"))
         result["auto_reenabled"] = False
         result["disabled_record"] = disabled
         result["display"] = dict(result.get("display") or {})
-        result["display"]["summary"] = f"额度耗尽 · 已移出轮询（{reason}）"
+        result["display"]["summary"] = f"额度耗尽 · 已删除账号（{reason}）"
         # disable_for_quota already writes last_quota; keep explicit snapshot too
         if account_id:
             try:

@@ -75,6 +75,26 @@ func (c *Client) StopAll(ctx context.Context) (map[string]any, error) {
 	return c.do(ctx, http.MethodPost, "/stop", map[string]any{}, nil)
 }
 
+func (c *Client) AutoReplenishStatus(ctx context.Context, light bool) (map[string]any, error) {
+	path := "/auto-replenish/status"
+	if light {
+		path += "?light=1"
+	}
+	return c.do(ctx, http.MethodGet, path, nil, nil)
+}
+
+func (c *Client) AutoReplenishRun(ctx context.Context) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/auto-replenish/run", map[string]any{}, nil)
+}
+
+func (c *Client) AutoReplenishStart(ctx context.Context) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/auto-replenish/start", map[string]any{}, nil)
+}
+
+func (c *Client) AutoReplenishStop(ctx context.Context) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/auto-replenish/stop", map[string]any{}, nil)
+}
+
 func (c *Client) StartDeviceLogin(ctx context.Context, request map[string]any) (map[string]any, error) {
 	return c.doAbsolute(ctx, http.MethodPost, "/internal/device/v1/login", request, nil)
 }

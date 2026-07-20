@@ -391,6 +391,12 @@ func NewMux(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/maintainer/run", func(w http.ResponseWriter, r *http.Request) {
 		serveMaintainerRun(w, r, options)
 	})
+	mux.HandleFunc("GET /admin/api/auto-replenish/status", func(w http.ResponseWriter, r *http.Request) {
+		serveAutoReplenishStatus(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/auto-replenish/run", func(w http.ResponseWriter, r *http.Request) {
+		serveAutoReplenishRun(w, r, options)
+	})
 	mux.HandleFunc("POST /admin/api/accounts/refresh", func(w http.ResponseWriter, r *http.Request) {
 		serveAccountsRefresh(w, r, options)
 	})
@@ -3174,6 +3180,7 @@ func serveAdminStatus(w http.ResponseWriter, r *http.Request, options Options, p
 		"settings":              map[string]any{},
 		"token_maintainer":      serviceStatus(options.Maintainer, options),
 		"model_health":          serviceStatus(options.ModelHealth, options),
+		"auto_replenish":        autoReplenishStatusLight(r.Context(), options),
 		"conversation_affinity": map[string]any{"enabled": options.AffinityStore != nil, "implementation": "go"},
 		"registration":          map[string]any{"mode": options.Config.RegistrationMode, "external": true, "available": options.Config.RegistrationServiceURL != ""},
 		"usage":                 usageLightSnapshot(r.Context(), options),
@@ -4186,6 +4193,7 @@ func serveAdminUpdateSettings(w http.ResponseWriter, r *http.Request, options Op
 		return
 	}
 	options.applySettingsToRuntime(settings)
+	syncAutoReplenishSidecar(r.Context(), options, settings)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": settings})
 }
 
@@ -4891,6 +4899,95 @@ func serveAccountsRefresh(w http.ResponseWriter, r *http.Request, options Option
 	result["maintainer"] = options.Maintainer.Status()
 	result["token_maintainer"] = result["maintainer"]
 	writeJSON(w, http.StatusOK, result)
+}
+
+
+
+func syncAutoReplenishSidecar(ctx context.Context, options Options, settings map[string]any) {
+	if settings == nil {
+		return
+	}
+	enabled := false
+	ok := false
+	if raw, exists := settings["auto_replenish_enabled"]; exists {
+		switch v := raw.(type) {
+		case bool:
+			enabled, ok = v, true
+		case string:
+			enabled = v == "1" || v == "true" || v == "True" || v == "yes" || v == "on"
+			ok = true
+		}
+	}
+	if !ok {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		return
+	}
+	if enabled {
+		_, _ = client.AutoReplenishStart(ctx)
+	} else {
+		_, _ = client.AutoReplenishStop(ctx)
+	}
+}
+
+func autoReplenishStatusLight(ctx context.Context, options Options) map[string]any {
+	client := registrationClient(options)
+	if client == nil {
+		return map[string]any{"enabled": false, "running": false, "available": false}
+	}
+	out, err := client.AutoReplenishStatus(ctx, true)
+	if err != nil {
+		return map[string]any{"enabled": false, "running": false, "available": false, "error": err.Error()}
+	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["available"] = true
+	return out
+}
+
+func serveAutoReplenishStatus(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, false) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	out, err := client.AutoReplenishStatus(r.Context(), false)
+	if err != nil {
+		if re, ok := err.(*regclient.Error); ok {
+			writeJSON(w, re.Status, map[string]any{"detail": re.Detail})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func serveAutoReplenishRun(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	out, err := client.AutoReplenishRun(r.Context())
+	if err != nil {
+		if re, ok := err.(*regclient.Error); ok {
+			writeJSON(w, re.Status, map[string]any{"detail": re.Detail})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func serveToggleTokenMaintain(w http.ResponseWriter, r *http.Request, options Options) {
