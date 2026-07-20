@@ -49,6 +49,7 @@ func defaultHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout: 0,
 		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
 			MaxIdleConns:        200,               // 增加全局空闲连接数
 			MaxIdleConnsPerHost: 100,               // 增加每个 host 的空闲连接数，支持高并发
 			MaxConnsPerHost:     200,               // 增加每个 host 的最大连接数
