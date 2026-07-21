@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import type { CSSProperties } from 'vue';
 
-import { computed, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { preferences, usePreferences } from '@/core/preferences';
@@ -10,10 +10,11 @@ import { GiteeIcon } from '@/icons';
 import { $t } from '@/locales';
 import { resetRoutes } from '@/router';
 import { useAuthStore, useUserStore } from '@/stores';
+import { getStatus } from '@/api/g2a';
 import { openWindow } from '@/utils';
 import { useVersionUpdate } from '@/utils/check-update';
 import { UserOutlined } from '@antdv-next/icons';
-import { Badge, Watermark } from 'antdv-next';
+import { Badge, Tag, Tooltip, Watermark } from 'antdv-next';
 
 import { BasicLayout } from './basic';
 import { useNotification } from './hooks/notification';
@@ -100,19 +101,73 @@ watch(
     immediate: true,
   },
 );
+/** 服务端版本，登录后由 /status 写入 userInfo */
+const appVersion = computed(() => {
+  const info = userStore.userInfo as any;
+  const v = info?.version || info?.desc || '';
+  if (!v) return '';
+  return String(v).startsWith('v') ? String(v) : `v${v}`;
+});
+
+const versionTitle = computed(() => {
+  const info = userStore.userInfo as any;
+  const parts = [appVersion.value || '版本未知'];
+  if (info?.runtime) parts.push(`runtime ${info.runtime}`);
+  if (info?.cliVersion) parts.push(`CLI ${info.cliVersion}`);
+  return parts.join(' · ');
+});
+
 // 检测版本更新
 useVersionUpdate();
+
+/** 布局挂载时拉取服务端版本（/status） */
+onMounted(async () => {
+  try {
+    const st: any = await getStatus();
+    const raw = String(st?.version || '').replace(/^v/i, '').trim();
+    if (!raw) return;
+    const version = `v${raw}`;
+    const prev = (userStore.userInfo || {
+      avatar: '',
+      avatarUrl: '',
+      permissions: ['*'],
+      realName: '管理员',
+      roles: ['admin'],
+      userId: 'admin',
+      username: 'admin',
+      email: '',
+    }) as any;
+    userStore.setUserInfo({
+      ...prev,
+      desc: version,
+      version,
+      runtime: st?.runtime || st?.implementation || prev.runtime || 'go',
+      cliVersion: st?.cli_version || prev.cliVersion || '',
+    });
+  } catch {
+    /* ignore */
+  }
+});
 </script>
 
 <template>
   <BasicLayout @clear-preferences-and-logout="handleLogout">
+<!-- 顶栏右侧版本徽章 -->
+    <template #header-right-0>
+      <Tooltip :title="versionTitle">
+        <Tag class="g2a-header-ver" color="processing">
+          {{ appVersion || '—' }}
+        </Tag>
+      </Tooltip>
+    </template>
+
     <template #user-dropdown>
       <UserDropdown
         :avatar
         :menus
         :text="userStore.userInfo?.realName"
         :description="userStore.userInfo?.email || '未设置邮箱'"
-        :tag-text="userStore.userInfo?.username"
+        :tag-text="appVersion || userStore.userInfo?.username"
         @logout="handleLogout"
         @clear-preferences-and-logout="handleLogout"
       />
@@ -150,3 +205,14 @@ useVersionUpdate();
     :style="watermarkStyle"
   />
 </template>
+
+<style scoped>
+.g2a-header-ver {
+  margin: 0 8px 0 0 !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: default;
+  user-select: none;
+}
+</style>

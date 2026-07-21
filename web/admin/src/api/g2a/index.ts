@@ -73,14 +73,20 @@ export const setAccountStatus = (id: string, body: Record<string, unknown>) =>
 export const deleteAccount = (id: string) =>
   api(`/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const deleteAccountsBatch = (ids: string[]) =>
-  api('/accounts/delete-batch', { method: 'POST', body: JSON.stringify({ account_ids: ids }) })
+  api('/accounts/delete-batch', {
+    method: 'POST',
+    body: JSON.stringify({ ids, account_ids: ids }),
+  })
 export const probeAccount = (id: string, model?: string) =>
   api(`/accounts/${encodeURIComponent(id)}/probe`, {
     method: 'POST',
     body: JSON.stringify(model ? { model } : {}),
   })
 export const probeBatch = (ids: string[]) =>
-  api('/accounts/probe-batch', { method: 'POST', body: JSON.stringify({ account_ids: ids }) })
+  api('/accounts/probe-batch', {
+    method: 'POST',
+    body: JSON.stringify({ ids, account_ids: ids }),
+  })
 export const probeAll = () => api('/accounts/probe-all', { method: 'POST', body: '{}' })
 export const refreshAccounts = (ids?: string[]) =>
   api('/accounts/refresh', {

@@ -112,7 +112,8 @@ export const useAuthStore = defineStore('auth', () => {
     }
 
     const email = status?.credentials_email || status?.admin_email || '';
-    const version = status?.version ? `v${status.version}` : '';
+    const rawVersion = String(status?.version || '').replace(/^v/i, '').trim();
+    const version = rawVersion ? `v${rawVersion}` : '';
     const userInfo: UserInfo = {
       avatar: '',
       avatarUrl: '',
@@ -124,6 +125,9 @@ export const useAuthStore = defineStore('auth', () => {
       email: email || '',
       homePath: preferences.app.defaultHomePath,
       desc: version,
+      version,
+      runtime: status?.runtime || status?.implementation || 'go',
+      cliVersion: status?.cli_version || '',
     };
     userStore.setUserInfo(userInfo);
     return userInfo;

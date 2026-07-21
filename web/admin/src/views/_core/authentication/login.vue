@@ -26,6 +26,7 @@ const route = useRoute();
 const loading = ref(false);
 const setupMode = ref(false);
 const errorText = ref('');
+const serverVersion = ref('');
 const form = reactive({
   password: '',
   confirm: '',
@@ -53,6 +54,8 @@ onMounted(async () => {
   try {
     const st = await g2aApi<any>('/status');
     setupMode.value = !!st?.setup_needed;
+    const v = String(st?.version || '').replace(/^v/i, '').trim();
+    serverVersion.value = v ? `v${v}` : '';
   } catch {
     setupMode.value = false;
   }
@@ -99,6 +102,7 @@ async function handleSubmit() {
           <TypographyTitle :level="3" style="margin: 0">
             grokcli-2api
           </TypographyTitle>
+      <div v-if="serverVersion" class="g2a-login-ver">{{ serverVersion }}</div>
           <TypographyParagraph type="secondary" style="margin: 8px 0 0">
             {{ setupMode ? '首次使用：设置管理员密码' : '管理台登录' }}
           </TypographyParagraph>

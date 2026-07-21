@@ -6525,6 +6525,9 @@ func serveAdminDeleteAccountsBatch(w http.ResponseWriter, r *http.Request, optio
 	}
 	ids := stringSlice(body["ids"])
 	if len(ids) == 0 {
+		ids = stringSlice(body["account_ids"])
+	}
+	if len(ids) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "ids is required"})
 		return
 	}
@@ -6595,6 +6598,9 @@ func serveAdminProbeBatch(w http.ResponseWriter, r *http.Request, options Option
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	ids := stringSlice(body["ids"])
+	if len(ids) == 0 {
+		ids = stringSlice(body["account_ids"])
+	}
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "ids is empty"})
 		return

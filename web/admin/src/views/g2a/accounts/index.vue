@@ -547,15 +547,28 @@ async function onRefreshTokens() {
 }
 
 async function onDeleteSelected() {
-  if (!selected.value.length) return
+  if (!selected.value.length) {
+    message.warning('请先勾选要删除的账号')
+    return
+  }
   modal.confirm({
     title: `删除选中的 ${selected.value.length} 个账号？`,
+    content: '将从数据库与账号池同步删除，不可恢复。',
     okType: 'danger',
     async onOk() {
-      await deleteAccountsBatch(selected.value)
-      selected.value = []
-      message.success('已删除')
-      await load()
+      try {
+        const r: any = await deleteAccountsBatch(selected.value)
+        selected.value = []
+        const removed = Number(r?.removed_count ?? 0)
+        const missing = Number(r?.missing_count ?? 0)
+        message.success(
+          `已删除 ${removed} 个` + (missing ? `，未找到 ${missing}` : ''),
+        )
+        await load()
+      } catch (e: any) {
+        message.error(e?.message || '删除失败')
+        throw e
+      }
     },
   })
 }
