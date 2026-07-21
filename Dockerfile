@@ -12,14 +12,22 @@ RUN go build -o /out/grok2api ./cmd/grok2api \
 # Optional Vue admin SPA (static/admin-spa). Multi-page static/admin remains default.
 FROM node:22-bookworm AS admin-builder
 WORKDIR /src/web/admin
-COPY web/admin/package.json web/admin/pnpm-lock.yaml web/admin/.npmrc ./
+# monorepo workspace (internal/* packages) must be present for pnpm install
+COPY web/admin/package.json web/admin/pnpm-lock.yaml web/admin/pnpm-workspace.yaml web/admin/.npmrc ./
+COPY web/admin/internal ./internal
+COPY web/admin/scripts ./scripts
 RUN corepack enable \
-    && corepack prepare pnpm@9.15.0 --activate \
+    && corepack prepare pnpm@9.15.9 --activate \
     && pnpm install --frozen-lockfile
 COPY web/admin/ ./
+# .dockerignore excludes .env*; restore committed env.* templates for Vite
+RUN cp -f env .env \
+    && cp -f env.development .env.development \
+    && cp -f env.production .env.production \
+    && (test ! -f env.test || cp -f env.test .env.test)
 RUN pnpm build \
     && test -f dist/index.html \
-    && test -d dist/assets
+    && (test -d dist/js || test -d dist/assets)
 
 FROM python:3.12-slim-bookworm
 
@@ -119,7 +127,7 @@ COPY . /app
 COPY --from=admin-builder /src/web/admin/dist /app/static/admin-spa
 RUN printf 'spa\n' > /app/static/admin-spa/.admin-ui \
     && test -f /app/static/admin-spa/index.html \
-    && test -d /app/static/admin-spa/assets \
+    && (test -d /app/static/admin-spa/js || test -d /app/static/admin-spa/assets) \
     && test -f /app/static/admin/index.html
 
 COPY --from=go-builder /out/grok2api /app/bin/grok2api

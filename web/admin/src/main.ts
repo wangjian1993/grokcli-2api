@@ -1,35 +1,44 @@
-import { createApp } from 'vue'
-import { createPinia } from 'pinia'
-import Antd from 'antdv-next'
-import 'antdv-next/dist/reset.css'
-import 'antdv-next/dist/antd.css'
-import App from './App.vue'
-import { router } from './router'
-import './assets/main.css'
+import { initPreferences } from '@/core/preferences';
+import { unmountGlobalLoading } from '@/utils';
 
-function showBootError(err: unknown) {
-  console.error('[admin]', err)
-  const el = document.getElementById('app')
-  if (el && !el.dataset.errorShown) {
-    el.dataset.errorShown = '1'
-    el.innerHTML =
-      '<div style="padding:24px;font-family:sans-serif;color:#a00">' +
-      '<h2>管理台加载失败</h2><pre style="white-space:pre-wrap">' +
-      String((err as any)?.stack || err) +
-      '</pre><p>请打开控制台查看详情，或强制刷新（Ctrl+Shift+R）后重试。</p></div>'
+import { overridesPreferences } from './preferences';
+
+/**
+ * 应用初始化完成之后再进行页面加载渲染
+ */
+async function initApplication() {
+  // name用于指定项目唯一标识
+  // 用于区分不同项目的偏好设置以及存储数据的key前缀以及其他一些需要隔离的数据
+  const env = import.meta.env.PROD ? 'prod' : 'dev';
+  const appVersion = import.meta.env.VITE_APP_VERSION;
+  const namespace = `${import.meta.env.VITE_APP_NAMESPACE}-${appVersion}-${env}`;
+
+  // app偏好设置初始化
+  await initPreferences({
+    namespace,
+    overrides: overridesPreferences,
+  });
+
+  // 强制使用项目 logo.png（避免旧 localStorage 偏好覆盖）
+  const { updatePreferences, preferences } = await import('@/core/preferences');
+  const logoSrc = overridesPreferences.logo?.source;
+  if (logoSrc && preferences.logo?.source !== logoSrc) {
+    updatePreferences({
+      logo: {
+        enable: true,
+        source: logoSrc,
+        fit: overridesPreferences.logo?.fit || 'contain',
+      },
+    });
   }
+
+  // 启动应用并挂载
+  // vue应用主要逻辑及视图
+  const { bootstrap } = await import('./bootstrap');
+  await bootstrap(namespace);
+
+  // 移除并销毁loading
+  unmountGlobalLoading();
 }
 
-const app = createApp(App)
-app.config.errorHandler = (err, _instance, info) => {
-  console.error('[admin]', info, err)
-  showBootError(err)
-}
-window.addEventListener('unhandledrejection', (ev) => {
-  showBootError(ev.reason)
-})
-
-app.use(createPinia())
-app.use(router)
-app.use(Antd)
-app.mount('#app')
+initApplication();

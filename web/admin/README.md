@@ -1,6 +1,13 @@
-# grokcli-2api Admin (antdv-next)
+# grokcli-2api Admin
 
-Vue 3 + Vite + [antdv-next](https://github.com/antdv-next/admin) 风格管理台。
+基于 [bell-plus](https://gitee.com/dapppp/bell-plus)（vben5 + antdv-next）重构的管理台 SPA。
+
+## 技术栈
+
+- Vue 3 + Vite + TypeScript
+- antdv-next + Tailwind CSS v4
+- Pinia + Vue Router（Hash 模式生产构建）
+- 业务 API：`/admin/api` + `X-Admin-Token`
 
 ## 开发
 
@@ -10,7 +17,7 @@ pnpm install
 pnpm dev
 ```
 
-默认把 `/admin/api` 代理到 `http://127.0.0.1:3000`。
+默认开发端口 `5173`，将 `/admin/api` 代理到 `http://127.0.0.1:3000`。
 
 ## 构建
 
@@ -18,12 +25,34 @@ pnpm dev
 pnpm build
 ```
 
-产物写入仓库 `static/admin-spa/`（`base=/static/admin-spa/`），**不会**覆盖多页 `static/admin/*.html`。
+- `base=/static/admin-spa/`
+- 产物写入 `dist/`，并自动复制到仓库 `static/admin-spa/`
+- **不会**覆盖多页 `static/admin/*.html`
 
-Docker 镜像构建时由 `admin-builder` 阶段自动 `pnpm build` 并安装到 `/app/static/admin-spa`。
-
-Go 服务端默认 `GROK2API_ADMIN_UI=auto`：存在 `static/admin-spa/index.html` 时 `/admin` 走 SPA，否则走多页。
+Docker 镜像由 `admin-builder` 阶段执行 `pnpm build`。
 
 ## 路由
 
-使用 Hash 模式：`https://host/admin#/login`、`https://host/admin#/keys` 等。入口页只需 `/admin`。
+Hash 模式：`https://host/admin#/auth/login`、`https://host/admin#/overview` 等。
+
+业务页面在 `src/views/g2a/`，静态菜单见 `src/router/routes/modules/g2a.ts`。
+
+## 环境变量
+
+因仓库 `.gitignore` / `.dockerignore` 会忽略 `.env*`，提交了无模板文件：
+
+| 文件 | 用途 |
+|------|------|
+| `env` | 基础配置（标题、namespace） |
+| `env.development` | 开发 |
+| `env.production` | 生产：`base=/static/admin-spa/`、Hash 路由、`/admin/api` |
+| `.env.example` | 示例 |
+
+本地开发可：
+
+```bash
+cp env .env && cp env.development .env.development
+pnpm dev
+```
+
+Docker 构建阶段会自动从 `env*` 复制为 `.env*` 再 `pnpm build`。
