@@ -461,10 +461,12 @@ func TestPrepareChainCapsFailover(t *testing.T) {
 }
 
 func TestGuardStreamAgainstEmptySlowFirstTokenPasses(t *testing.T) {
-	// Slow TTFT: no frames within the 1s peek window must NOT be treated as empty.
+	// Slow TTFT: no frames within the peek budget must NOT be treated as empty.
+	// After budget, the guarded reader must still deliver the late content
+	// (single-reader pump; no dual-read race dropping frames).
 	pr, pw := io.Pipe()
 	go func() {
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n"))
 		_ = pw.Close()
 	}()
@@ -478,7 +480,55 @@ func TestGuardStreamAgainstEmptySlowFirstTokenPasses(t *testing.T) {
 	if guarded == nil {
 		t.Fatal("expected reader")
 	}
-	_ = guarded.Close()
+	defer guarded.Close()
+	var got strings.Builder
+	err = grok.ReadSSE(guarded, func(event grok.Event) error {
+		if event.Done {
+			return nil
+		}
+		got.Write(event.Data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.String(), "late") {
+		t.Fatalf("slow first token content lost after peek budget: %q", got.String())
+	}
+}
+
+func TestGuardStreamAgainstEmptyDoesNotDualRead(t *testing.T) {
+	// Regression: returning raw body while peeker still scanned caused dual Read
+	// and intermittent empty 502 under medium thinking TTFT.
+	// Content arrives just after the peek budget; client must still see it.
+	pr, pw := io.Pipe()
+	go func() {
+		// Hollow keepalive-like frames first (usage-only / empty delta), then content.
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{}}]}\n\n"))
+		time.Sleep(emptyStreamNoDataBudget + 30*time.Millisecond)
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"after-budget\"}}]}\n\ndata: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatalf("must not treat delayed content as empty")
+	}
+	defer guarded.Close()
+	var got strings.Builder
+	if err := grok.ReadSSE(guarded, func(event grok.Event) error {
+		if !event.Done {
+			got.Write(event.Data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.String(), "after-budget") {
+		t.Fatalf("content after peek budget lost (dual-read race?): %q", got.String())
+	}
 }
 
 func TestChatFingerprintPrefersPromptCacheKey(t *testing.T) {
@@ -815,5 +865,132 @@ func TestChatToolAssemblerFeedFinishThenSoftDisconnect(t *testing.T) {
 	// Feed already finished; soft-disconnect flush must not duplicate finish_reason.
 	if term := a.FinishReasonFrame(); term != nil {
 		t.Fatalf("unexpected second terminal %#v", term)
+	}
+}
+
+func TestChatToolAssemblerSoftWriteRequeue(t *testing.T) {
+	a := NewChatToolStreamAssembler()
+	a.SetAllowedTools([]string{"Edit"})
+	raw := []byte(`{"id":"c1","model":"g","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Edit","arguments":"{\"file_path\":\"/x\",\"old_string\":\"a\",\"new_string\":\"b\"}"}}]},"finish_reason":null}]}`)
+	delta, err := ParseChatDelta(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, passthrough := a.Feed(raw, delta)
+	if passthrough {
+		t.Fatal("expected non-passthrough tool frames")
+	}
+	if len(frames) == 0 {
+		t.Fatal("expected emitted tool frames")
+	}
+	// Soft write: not Ack'd
+	if !a.HasUnacked() {
+		t.Fatal("expected unacked after emit without Ack")
+	}
+	a.RequeueUnacked()
+	// Finish should re-emit
+	again := a.Finish()
+	if len(again) == 0 {
+		t.Fatal("Finish after requeue must re-emit tool frames")
+	}
+	// Ack success
+	encoded, _ := json.Marshal(again[0])
+	a.AckPayload(string(encoded))
+	// FinishReason + Ack
+	term := a.FinishReasonFrame()
+	if term == nil {
+		t.Fatal("expected finish_reason frame")
+	}
+	termEnc, _ := json.Marshal(term)
+	a.AckPayload(string(termEnc))
+	if a.NeedsFinishRetry() {
+		t.Fatal("no retry after full Ack")
+	}
+	if second := a.FinishReasonFrame(); second != nil {
+		t.Fatalf("idempotent FinishReasonFrame, got %#v", second)
+	}
+}
+
+func TestGuardStreamAgainstEmptyHollowThenDone(t *testing.T) {
+	// Hollow drips (empty delta) then [DONE] within hollow budget must be empty
+	// so OpenStream can failover before Anthropic message_start opens.
+	// This is the intermittent Claude Code high-effort empty-output path.
+	pr, pw := io.Pipe()
+	go func() {
+		// Immediate hollow frame (activity → hollow path, not pure silence).
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1}}\n\n"))
+		time.Sleep(200 * time.Millisecond)
+		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatalf("hollow-then-done must be empty for failover, guarded=%v", guarded != nil)
+	}
+	if guarded != nil {
+		_ = guarded.Close()
+	}
+}
+
+func TestGuardStreamAgainstEmptyHollowThenContentIsLive(t *testing.T) {
+	// Hollow keepalive then real content within hollow budget must stay live.
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{}}]}\n\n"))
+		time.Sleep(150 * time.Millisecond)
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatal("hollow then content must be live")
+	}
+	defer guarded.Close()
+	var got strings.Builder
+	if err := grok.ReadSSE(guarded, func(event grok.Event) error {
+		if !event.Done {
+			got.Write(event.Data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.String(), "hi") {
+		t.Fatalf("content lost: %q", got.String())
+	}
+}
+
+func TestGuardStreamAgainstEmptySilenceThenDone(t *testing.T) {
+	// Pure silence then [DONE] within abs budget must be empty (failover).
+	// Matches Claude high-effort hollow empties that never send a model delta.
+	pr, pw := io.Pipe()
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	// Cap abs budget for test speed via short-circuit: we can't override const,
+	// so 800ms silence+done is well under 15s and must return empty.
+	started := time.Now()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatalf("silence-then-done must be empty for failover (elapsed=%v)", elapsed)
+	}
+	if guarded != nil {
+		_ = guarded.Close()
+	}
+	// Should resolve near the 800ms write, not wait full 15s.
+	if elapsed > 5*time.Second {
+		t.Fatalf("took too long %v (should resolve soon after DONE)", elapsed)
 	}
 }

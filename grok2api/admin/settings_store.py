@@ -88,16 +88,10 @@ _PG_SCALAR_KEYS = (
     "model_health_auto_disable",
     "probe_models",
     "default_model",
-    "cooldown_default_sec",
-    "cooldown_auth_sec",
-    "cooldown_rate_limit_sec",
-    "cooldown_server_error_sec",
-    "cooldown_max_sec",
     "soft_model_block_ttl_sec",
     "durable_model_block_ttl_sec",
     "probe_fail_kick_streak",
     "probe_fail_disable_streak",
-    "probe_kick_cooldown_sec",
     "max_failover_attempts",
     # Protocol registration (MoeMail / YesCaptcha / proxy) — admin UI config
     "registration_config",
@@ -3378,17 +3372,11 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
         set_auto_replenish_interval_sec(patch["auto_replenish_interval_sec"])
     # Pool rotation / cooldown policy (nested or flat)
     pool_keys = (
-        "cooldown_default_sec",
-        "cooldown_auth_sec",
-        "cooldown_rate_limit_sec",
-        "cooldown_server_error_sec",
-        "cooldown_max_sec",
-        "soft_model_block_ttl_sec",
+                            "soft_model_block_ttl_sec",
         "durable_model_block_ttl_sec",
         "probe_fail_kick_streak",
         "probe_fail_disable_streak",
-        "probe_kick_cooldown_sec",
-        "max_failover_attempts",
+            "max_failover_attempts",
     )
     pool_patch: dict[str, Any] = {}
     nested = patch.get("pool_policy")

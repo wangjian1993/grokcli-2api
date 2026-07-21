@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -60,9 +61,10 @@ type AffinityStore interface {
 }
 
 type ChatRequest struct {
-	Model  string         `json:"model"`
-	Stream bool           `json:"stream"`
-	Raw    map[string]any `json:"-"`
+	Model     string         `json:"model"`
+	Stream    bool           `json:"stream"`
+	Raw       map[string]any `json:"-"`
+	UserAgent string         `json:"-"` // optional; Codex auto-compact threshold
 }
 
 type StreamFrame struct {
@@ -141,7 +143,7 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 		return ChatResult{}, err
 	}
 	accounts := upstreamAccounts(chain)
-	body, prep := PrepareUpstreamBodyDetailed(request.Raw)
+	body, prep := PrepareUpstreamBodyDetailed(request.Raw, request.UserAgent)
 	fingerprint := ChatFingerprint(request)
 	// Prefer account already boosted to chain[0] by prepareChain/ensureStickyCandidate.
 	// Avoid a second Redis GET on the TTFT hot path.
@@ -231,7 +233,7 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 		return StreamOpen{}, err
 	}
 	accounts := upstreamAccounts(chain)
-	body, prep := PrepareUpstreamBodyDetailed(request.Raw)
+	body, prep := PrepareUpstreamBodyDetailed(request.Raw, request.UserAgent)
 	fingerprint := ChatFingerprint(request)
 	// Prefer account already boosted to chain[0] by prepareChain/ensureStickyCandidate.
 	// Avoid a second Redis GET on the TTFT hot path.
@@ -734,8 +736,8 @@ func (c *chatCollector) response() map[string]any {
 }
 
 // preferredShellArgKey resolves the client-facing shell arg name for a tool.
-// Defaults to "cmd" (Codex) for shell-family tools; honors an explicit map from
-// the client tool schema when present.
+// Honors an explicit map from the client tool schema when present; otherwise
+// defaults via toolcall.DefaultShellArgKey (Codex "cmd", Hermes terminal "command").
 func preferredShellArgKey(name string, keys map[string]string) string {
 	if keys != nil {
 		if v := strings.TrimSpace(keys[name]); v != "" {
@@ -751,7 +753,7 @@ func preferredShellArgKey(name string, keys map[string]string) string {
 		}
 	}
 	if toolcall.IsShellTool(name) {
-		return "cmd"
+		return toolcall.DefaultShellArgKey(name)
 	}
 	return ""
 }
@@ -867,9 +869,26 @@ func normalizeOutboundToolCalls(calls []map[string]any, shellArgKeys map[string]
 			}
 		}
 		// Live: strict; force: CompleteJSON (after coerce already applied).
+		// Force-finish: if still incomplete, accept non-empty JSON object salvage so
+		// clients do not see half-open tool_use ("Tool use interrupted").
 		if force {
 			if !toolcall.CompleteJSON(args, name) {
-				continue
+				args2 := strings.TrimSpace(args)
+				okSalvage := false
+				if args2 != "" && (args2[0] == '{' || args2[0] == '[') {
+					var raw any
+					if json.Unmarshal([]byte(args2), &raw) == nil {
+						switch v := raw.(type) {
+						case map[string]any:
+							okSalvage = len(v) > 0
+						case []any:
+							okSalvage = len(v) > 0
+						}
+					}
+				}
+				if !okSalvage {
+					continue
+				}
 			}
 		} else if !toolcall.CompleteJSONStrict(args, name) {
 			continue
@@ -953,11 +972,19 @@ type ChatToolStreamAssembler struct {
 	toolCalls    []map[string]any
 	functionCall map[string]any
 	emitted      map[int]bool
+	// clientAcked: true only after the tool frame Write succeeded. Soft write
+	// failures leave emitted=true but unacked so RequeueUnacked can re-emit
+	// complete tool_calls (Claude Code "Tool use interrupted").
+	clientAcked map[int]bool
+	// pendingAcks: indexes framed in the last emitReadyToolFrames call.
+	pendingAcks  []int
 	finishReason any
 	usage        any
 	// finished is set after a finish_reason frame is produced so soft-disconnect
 	// force-finish does not emit a second terminal chunk.
 	finished bool
+	// finishedAcked: true only after finish_reason Write succeeded.
+	finishedAcked bool
 	// shellArgKeys maps tool name → preferred client shell arg key ("cmd" or "command").
 	// Empty/nil defaults shell-family tools to "cmd" (Codex schema).
 	shellArgKeys map[string]string
@@ -966,7 +993,7 @@ type ChatToolStreamAssembler struct {
 }
 
 func NewChatToolStreamAssembler() *ChatToolStreamAssembler {
-	return &ChatToolStreamAssembler{emitted: map[int]bool{}, shellArgKeys: map[string]string{}}
+	return &ChatToolStreamAssembler{emitted: map[int]bool{}, clientAcked: map[int]bool{}, shellArgKeys: map[string]string{}}
 }
 
 // SetShellArgKeys configures client-facing shell parameter names (Codex: "cmd").
@@ -1076,6 +1103,8 @@ func (a *ChatToolStreamAssembler) Finish() []map[string]any {
 	if a == nil {
 		return nil
 	}
+	// Soft write may have left unacked tools; requeue before force-finish.
+	a.RequeueUnacked()
 	return a.emitReadyToolFrames(true)
 }
 
@@ -1095,6 +1124,7 @@ func (a *ChatToolStreamAssembler) EmittedAny() bool {
 // FinishReasonFrame returns a terminal finish_reason chunk once. Soft-disconnect
 // and [DONE] both call this; a nil return means already finished (or no tools).
 func (a *ChatToolStreamAssembler) FinishReasonFrame() map[string]any {
+	// Idempotent unless RequeueUnacked cleared finished after soft write.
 	if a == nil || a.finished {
 		return nil
 	}
@@ -1103,6 +1133,117 @@ func (a *ChatToolStreamAssembler) FinishReasonFrame() map[string]any {
 		return nil
 	}
 	return a.finishFrame()
+}
+
+// AckPayload marks tools whose index/id appear in a successfully written JSON payload,
+// and finish_reason when present.
+func (a *ChatToolStreamAssembler) AckPayload(payload string) {
+	if a == nil || payload == "" {
+		return
+	}
+	if a.clientAcked == nil {
+		a.clientAcked = map[int]bool{}
+	}
+	if a.emitted == nil {
+		a.emitted = map[int]bool{}
+	}
+	if strings.Contains(payload, "finish_reason") && a.finished {
+		a.finishedAcked = true
+	}
+	if !strings.Contains(payload, "tool_calls") && !strings.Contains(payload, "function_call") {
+		return
+	}
+	for _, idx := range a.pendingAcks {
+		// Best-effort: if payload has tool_calls/function_call, ack pending in order.
+		// Chat frames usually carry one batch of ready tools.
+		a.clientAcked[idx] = true
+	}
+	// Also ack any emitted tool whose id appears in payload.
+	for i, call := range a.toolCalls {
+		if !a.emitted[i] || a.clientAcked[i] {
+			continue
+		}
+		if id, _ := call["id"].(string); id != "" && strings.Contains(payload, id) {
+			a.clientAcked[i] = true
+		}
+	}
+	if a.emitted[-1] && !a.clientAcked[-1] && strings.Contains(payload, "function_call") {
+		a.clientAcked[-1] = true
+	}
+	// Drop acked from pending
+	kept := a.pendingAcks[:0]
+	for _, idx := range a.pendingAcks {
+		if !a.clientAcked[idx] {
+			kept = append(kept, idx)
+		}
+	}
+	a.pendingAcks = kept
+}
+
+// RequeueUnacked rolls back framed-but-unacked tools so Finish can re-emit them.
+func (a *ChatToolStreamAssembler) RequeueUnacked() {
+	if a == nil {
+		return
+	}
+	if a.clientAcked == nil {
+		a.clientAcked = map[int]bool{}
+	}
+	if a.emitted == nil {
+		a.emitted = map[int]bool{}
+	}
+	if a.finished && !a.finishedAcked {
+		a.finished = false
+	}
+	for idx, em := range a.emitted {
+		if !em || a.clientAcked[idx] {
+			continue
+		}
+		a.emitted[idx] = false
+	}
+	a.pendingAcks = a.pendingAcks[:0]
+}
+
+// NeedsFinishRetry reports soft-fail recovery still has work.
+func (a *ChatToolStreamAssembler) NeedsFinishRetry() bool {
+	if a == nil {
+		return false
+	}
+	if a.finished && !a.finishedAcked {
+		return true
+	}
+	for idx, em := range a.emitted {
+		if em && !a.clientAcked[idx] {
+			return true
+		}
+	}
+	// Pending complete tools never framed
+	if a.Holding() {
+		for i := range a.toolCalls {
+			if !a.emitted[i] {
+				return true
+			}
+		}
+		if a.functionCall != nil && !a.emitted[-1] {
+			return true
+		}
+	}
+	return false
+}
+
+// HasUnacked reports framed-but-unacked tools or terminal.
+func (a *ChatToolStreamAssembler) HasUnacked() bool {
+	if a == nil {
+		return false
+	}
+	if a.finished && !a.finishedAcked {
+		return true
+	}
+	for idx, em := range a.emitted {
+		if em && !a.clientAcked[idx] {
+			return true
+		}
+	}
+	return len(a.pendingAcks) > 0
 }
 
 func (a *ChatToolStreamAssembler) mergeToolCalls(calls []map[string]any) {
@@ -1126,6 +1267,8 @@ func (a *ChatToolStreamAssembler) mergeFunctionCall(call map[string]any) {
 }
 
 func (a *ChatToolStreamAssembler) emitReadyToolFrames(force bool) []map[string]any {
+	// Fresh pending batch for this emit.
+	a.pendingAcks = a.pendingAcks[:0]
 	// Live path (force=false): EffectiveJSON only — do not invent missing new_string.
 	// Force-finish (force=true / non-stream collector): CoerceCompleteJSON fills
 	// delete-match defaults so incomplete path+old still emit at stream end.
@@ -1141,11 +1284,14 @@ func (a *ChatToolStreamAssembler) emitReadyToolFrames(force bool) []map[string]a
 		if raw, ok := numberToInt64(call["index"]); ok {
 			idx = int(raw)
 		}
-		if a.emitted[idx] {
+		if a.emitted[idx] && a.clientAcked[idx] {
 			continue
 		}
 		// Only emit when force or arguments complete (already filtered by normalize).
+		// Mark framed but not acked — soft write can RequeueUnacked and re-emit.
 		a.emitted[idx] = true
+		a.clientAcked[idx] = false
+		a.pendingAcks = append(a.pendingAcks, idx)
 		ready = append(ready, call)
 	}
 	var frames []map[string]any
@@ -1165,8 +1311,10 @@ func (a *ChatToolStreamAssembler) emitReadyToolFrames(force bool) []map[string]a
 		frames = append(frames, payload)
 	}
 	if force {
-		if fn := normalizeOutboundFunctionCall(a.functionCall, a.shellArgKeys, a.allowedTools); fn != nil && !a.emitted[-1] {
+		if fn := normalizeOutboundFunctionCall(a.functionCall, a.shellArgKeys, a.allowedTools); fn != nil && !(a.emitted[-1] && a.clientAcked[-1]) {
 			a.emitted[-1] = true
+			a.clientAcked[-1] = false
+			a.pendingAcks = append(a.pendingAcks, -1)
 			payload := a.baseChunk()
 			payload["choices"] = []any{map[string]any{
 				"index":         0,
@@ -1180,6 +1328,7 @@ func (a *ChatToolStreamAssembler) emitReadyToolFrames(force bool) []map[string]a
 }
 
 func (a *ChatToolStreamAssembler) finishFrame() map[string]any {
+	// Idempotent unless RequeueUnacked cleared finished after soft write.
 	if a.finished {
 		return nil
 	}
@@ -1741,75 +1890,314 @@ func numberToInt64(value any) (int64, bool) {
 	}
 }
 
+// emptyStreamNoDataBudget: pure silence window before we enter the long wait.
+// Instant activity (hollow or model) is classified as soon as the first frame lands.
+const emptyStreamNoDataBudget = 120 * time.Millisecond
+
+// emptyStreamAbsBudget: max open-time peek when upstream has not yet produced a
+// model payload. High-effort hollow empties often finish in 5–15s of silence or
+// empty deltas then [DONE]. Waiting here (before Anthropic message_start) lets
+// OpenStream failover. Healthy high-effort first tokens usually arrive within
+// this window; if not, we pass live and the stream continues (slow TTFT).
+const emptyStreamAbsBudget = 15 * time.Second
+
+// emptyStreamHollowBudget: once hollow frames arrive, prefer resolving empty vs
+// live within this sub-window (still capped by absBudget). Instant hollow+[DONE]
+// failovers faster than waiting the full abs budget.
+const emptyStreamHollowBudget = 8 * time.Second
+
+// emptyStreamPeekBudget is an alias kept for tests that time delays against the
+// short silence window (historical name).
+const emptyStreamPeekBudget = emptyStreamNoDataBudget
+
 // guardStreamAgainstEmpty peeks upstream SSE until the first model payload or
 // stream end. Empty HTTP 200 bodies can then failover before the client envelope
 // is opened. On success, returns a reader that replays peeked frames + remainder.
 //
-// Ultra-short peek (50ms): only catch instant empty/[DONE], never wait for slow first tokens.
-// On timeout, pass through without treating slow TTFT as empty.
+// Single-reader design: one pump goroutine owns body.Read into an in-memory
+// buffer (pumpedStream). Peek and the client consumer both read that buffer —
+// never two concurrent readers on the HTTP body.
+//
+// Hollow-stream detection: if frames arrive but carry no content/reasoning/tools
+// (empty delta / usage-only / finish_reason only), keep peeking until [DONE] or
+// emptyStreamHollowBudget. Previously an 80ms budget treated hollow drips as live
+// and the Anthropic envelope opened before we knew the stream would end empty.
 func guardStreamAgainstEmpty(body io.ReadCloser) (io.ReadCloser, bool, error) {
 	if body == nil {
 		return nil, true, &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
 	}
 
+	pumped := newPumpedStream(body)
+
 	type peekResult struct {
-		sawModel bool
-		sawDone  bool
-		buffered string
-		err      error
+		sawModel  bool
+		sawDone   bool
+		sawHollow bool // at least one non-model frame arrived
+		buffered  string
+		err       error
 	}
+
+	stopPeek := make(chan struct{})
+	var stopOnce sync.Once
+	requestStop := func() { stopOnce.Do(func() { close(stopPeek) }) }
 
 	resultCh := make(chan peekResult, 1)
 	go func() {
 		var buffered strings.Builder
 		sawModel := false
 		sawDone := false
-		err := grok.ReadSSE(io.TeeReader(body, &buffered), func(event grok.Event) error {
+		sawHollow := false
+		src := &peekerReader{p: pumped, stop: stopPeek}
+		err := grok.ReadSSE(io.TeeReader(src, &buffered), func(event grok.Event) error {
 			if event.Done {
 				sawDone = true
 				return errStopPeek
 			}
 			delta, parseErr := parseChatDelta(event.Data)
 			if parseErr != nil {
+				// Malformed / keepalive — still counts as activity (not pure silence).
+				sawHollow = true
 				return nil
 			}
-			if strings.TrimSpace(delta.Content) != "" || strings.TrimSpace(delta.Reasoning) != "" || len(delta.ToolCalls) > 0 || delta.FunctionCall != nil {
+			if strings.TrimSpace(delta.Content) != "" ||
+				strings.TrimSpace(delta.Reasoning) != "" ||
+				len(delta.ToolCalls) > 0 ||
+				delta.FunctionCall != nil {
 				sawModel = true
 				return errStopPeek
 			}
+			// Empty delta, finish_reason-only, usage-only → hollow drip.
+			sawHollow = true
 			return nil
 		})
 		if err != nil && !errors.Is(err, errStopPeek) {
 			resultCh <- peekResult{err: err}
 			return
 		}
-		resultCh <- peekResult{sawModel: sawModel, sawDone: sawDone, buffered: buffered.String()}
+		resultCh <- peekResult{sawModel: sawModel, sawDone: sawDone, sawHollow: sawHollow, buffered: buffered.String()}
 	}()
 
-	// Ultra-short empty-stream peek (50ms): only catch instant empty/[DONE], never wait for slow first tokens.
+	finishLive := func(buffered string) io.ReadCloser {
+		replayed := io.MultiReader(strings.NewReader(buffered), pumped)
+		return &multiClose{Reader: replayed, closer: pumped}
+	}
+
+	// Stage 1: short wait — pure silence (slow TTFT) vs any activity.
 	select {
 	case result := <-resultCh:
 		if result.err != nil {
-			_ = body.Close()
+			_ = pumped.Close()
 			return nil, false, result.err
 		}
-		if !result.sawModel && result.sawDone {
-			// 确实是空响应（收到 [DONE] 但没有内容）
-			_, _ = io.Copy(io.Discard, body)
-			_ = body.Close()
+		if result.sawModel {
+			return finishLive(result.buffered), false, nil
+		}
+		if result.sawDone && !result.sawModel {
+			_ = pumped.Close()
 			return io.NopCloser(strings.NewReader(result.buffered)), true, nil
 		}
-		// 有内容或者流还在继续 → 正常返回
-		replayed := io.MultiReader(strings.NewReader(result.buffered), body)
-		return &multiClose{Reader: replayed, closer: body}, false, nil
-	case <-time.After(50 * time.Millisecond):
-		// Peek deadline elapsed: pass through without waiting for full first token.
-		// 注意：这里不关闭 body，让它继续流式输出
-		return body, false, nil
+		return finishLive(result.buffered), false, nil
+	case <-time.After(emptyStreamNoDataBudget):
+	}
+
+	// Race: peeker may have finished during the short wait.
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			_ = pumped.Close()
+			return nil, false, result.err
+		}
+		if result.sawModel {
+			return finishLive(result.buffered), false, nil
+		}
+		if result.sawDone && !result.sawModel {
+			_ = pumped.Close()
+			return io.NopCloser(strings.NewReader(result.buffered)), true, nil
+		}
+		return finishLive(result.buffered), false, nil
+	default:
+	}
+
+	// Still peeking after noDataBudget. Wait up to absBudget for model / Done.
+	// Pure silence that ends empty in 5–15s (Claude high-effort hollow) must NOT
+	// be passed live at 6s — that was the 12s ttft_missing empty path.
+	// Hollow drips use the same wait (capped); model frames return immediately.
+	waitRem := emptyStreamAbsBudget - emptyStreamNoDataBudget
+	if waitRem < time.Second {
+		waitRem = time.Second
+	}
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			_ = pumped.Close()
+			return nil, false, result.err
+		}
+		if result.sawModel {
+			return finishLive(result.buffered), false, nil
+		}
+		if result.sawDone && !result.sawModel {
+			_ = pumped.Close()
+			return io.NopCloser(strings.NewReader(result.buffered)), true, nil
+		}
+		return finishLive(result.buffered), false, nil
+	case <-time.After(waitRem):
+		requestStop()
+		result := <-resultCh
+		if result.err != nil {
+			_ = pumped.Close()
+			return nil, false, result.err
+		}
+		if result.sawModel {
+			return finishLive(result.buffered), false, nil
+		}
+		// Terminal empty within abs window (including hollow-then-DONE finishing
+		// just as we stop) → failover.
+		if result.sawDone && !result.sawModel {
+			_ = pumped.Close()
+			return io.NopCloser(strings.NewReader(result.buffered)), true, nil
+		}
+		// Still no terminal signal after absBudget → live (very slow first token).
+		return finishLive(result.buffered), false, nil
 	}
 }
 
 var errStopPeek = errors.New("stop peek")
+
+// peekerReader reads from pumpedStream but can be cancelled via stop while
+// waiting for the first/next bytes (returns errStopPeek without consuming).
+type peekerReader struct {
+	p    *pumpedStream
+	stop <-chan struct{}
+}
+
+func (r *peekerReader) Read(b []byte) (int, error) {
+	if r == nil || r.p == nil {
+		return 0, io.EOF
+	}
+	for {
+		// Fast path: data already buffered.
+		if n, err, ok := r.p.tryRead(b); ok {
+			return n, err
+		}
+		// Wait for data, close, or stop signal.
+		select {
+		case <-r.stop:
+			// Re-check buffer once more in case data arrived with stop.
+			if n, err, ok := r.p.tryRead(b); ok {
+				return n, err
+			}
+			return 0, errStopPeek
+		case <-time.After(5 * time.Millisecond):
+			// Poll: pumpedStream has no per-waiter channel; short poll is fine
+			// for the ~80ms peek window. Cond is still used by pump for batching.
+			continue
+		}
+	}
+}
+
+// pumpedStream is a single-owner pump of an upstream body into an in-memory
+// buffer. Concurrent Read calls are serialized; only the pump goroutine calls
+// src.Read. Peek and client both consume this buffer — no dual body.Read.
+type pumpedStream struct {
+	src    io.ReadCloser
+	mu     sync.Mutex
+	cond   *sync.Cond
+	buf    bytes.Buffer
+	err    error // set when pump ends (io.EOF or read error)
+	closed bool
+}
+
+func newPumpedStream(src io.ReadCloser) *pumpedStream {
+	p := &pumpedStream{src: src}
+	p.cond = sync.NewCond(&p.mu)
+	go p.pump()
+	return p
+}
+
+func (p *pumpedStream) pump() {
+	tmp := make([]byte, 32*1024)
+	for {
+		n, err := p.src.Read(tmp)
+		p.mu.Lock()
+		if n > 0 {
+			_, _ = p.buf.Write(tmp[:n])
+			p.cond.Broadcast()
+		}
+		if err != nil {
+			if p.err == nil {
+				p.err = err
+			}
+			p.cond.Broadcast()
+			p.mu.Unlock()
+			return
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return
+		}
+		p.mu.Unlock()
+	}
+}
+
+// tryRead returns (n, err, true) when data/EOF/closed is available without blocking.
+func (p *pumpedStream) tryRead(b []byte) (int, error, bool) {
+	if p == nil {
+		return 0, io.EOF, true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.buf.Len() > 0 {
+		n, err := p.buf.Read(b)
+		return n, err, true
+	}
+	if p.closed {
+		return 0, io.ErrClosedPipe, true
+	}
+	if p.err != nil {
+		return 0, p.err, true
+	}
+	return 0, nil, false
+}
+
+func (p *pumpedStream) Read(b []byte) (int, error) {
+	if p == nil {
+		return 0, io.EOF
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for p.buf.Len() == 0 && p.err == nil && !p.closed {
+		p.cond.Wait()
+	}
+	if p.buf.Len() > 0 {
+		return p.buf.Read(b)
+	}
+	if p.closed {
+		return 0, io.ErrClosedPipe
+	}
+	if p.err != nil {
+		return 0, p.err
+	}
+	return 0, io.EOF
+}
+
+func (p *pumpedStream) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	p.cond.Broadcast()
+	src := p.src
+	p.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	return src.Close()
+}
 
 type multiClose struct {
 	io.Reader

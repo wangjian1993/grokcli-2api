@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const APIVersion = "v1"
@@ -152,7 +154,20 @@ func (c *Client) doAbsolute(ctx context.Context, method, absPath string, body an
 	}
 	httpClient := c.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		// Fail-fast for admin poll paths — DefaultClient has no timeout and can
+		// freeze registration log refresh for tens of seconds under load.
+		// Keep under the browser poll budget (~2s) so Go→sidecar→browser stays snappy.
+		httpClient = &http.Client{
+			// Keep under browser REG_POLL_TIMEOUT_MS (1.2s) so admin log ticks stay live.
+			Timeout: 900 * time.Millisecond,
+			Transport: &http.Transport{
+				DialContext:           (&net.Dialer{Timeout: 400 * time.Millisecond}).DialContext,
+				MaxIdleConns:          64,
+				MaxIdleConnsPerHost:   32,
+				IdleConnTimeout:       30 * time.Second,
+				ResponseHeaderTimeout: 700 * time.Millisecond,
+			},
+		}
 	}
 	response, err := httpClient.Do(request)
 	if err != nil {
