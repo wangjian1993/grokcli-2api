@@ -1291,18 +1291,3 @@ html[data-theme="light"] .g2a-table-usage .ue-sub {
   color: rgba(0,0,0,.45);
 }
 
-
-/* mobile nav svg icons */
-.g2a-mobile-nav a {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.g2a-mobile-nav a .g2a-menu-ico {
-  width: 16px;
-  height: 16px;
-}
-.g2a-mobile-nav a .g2a-ico {
-  width: 14px;
-  height: 14px;
-}
