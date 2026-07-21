@@ -1,33 +1,33 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const rootDir = fileURLToPath(new URL('.', import.meta.url))
-const repoStaticAdmin = resolve(rootDir, '../../static/admin')
+// Built SPA lives beside the legacy multi-page admin (static/admin/*.html).
+// Never overwrite static/admin — that tree is the production multi-page UI.
+const repoStaticAdminSpa = resolve(rootDir, '../../static/admin-spa')
 
-// Assets under /static/admin/ (existing Go static handler).
+// Assets under /static/admin-spa/ (served by GET /static/{file...}).
 // Vue Router uses Hash mode (see src/router); only /admin shell is needed.
 export default defineConfig({
-  base: '/static/admin/',
+  base: '/static/admin-spa/',
   plugins: [
     vue(),
     {
-      name: 'copy-to-repo-static-admin',
+      name: 'copy-to-repo-static-admin-spa',
       closeBundle() {
-        // Local/dev convenience: mirror dist -> ../../static/admin when path exists.
         try {
           const dist = resolve(rootDir, 'dist')
           if (!existsSync(dist)) return
-          mkdirSync(repoStaticAdmin, { recursive: true })
-          // empty then copy
-          rmSync(repoStaticAdmin, { recursive: true, force: true })
-          mkdirSync(repoStaticAdmin, { recursive: true })
-          cpSync(dist, repoStaticAdmin, { recursive: true })
-          console.log('[build] copied dist ->', repoStaticAdmin)
+          rmSync(repoStaticAdminSpa, { recursive: true, force: true })
+          mkdirSync(repoStaticAdminSpa, { recursive: true })
+          cpSync(dist, repoStaticAdminSpa, { recursive: true })
+          writeFileSync(resolve(repoStaticAdminSpa, '.admin-ui'), 'spa\n')
+          console.log('[build] copied dist ->', repoStaticAdminSpa)
         } catch (e) {
-          console.warn('[build] skip copy to repo static/admin:', e)
+          console.warn('[build] skip copy to repo static/admin-spa:', e)
         }
       },
     },

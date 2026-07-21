@@ -52,6 +52,7 @@ type Config struct {
 	RegistrationServiceURL          string
 	RegistrationToken               string
 	StaticDir                       string
+	AdminUI                         string // legacy | spa | auto
 	SSEKeepalive                    time.Duration
 	RequestTimeout                  time.Duration
 	OutboundMaxTools                int
@@ -212,6 +213,7 @@ func Load() (Config, error) {
 		RegistrationServiceURL:          strings.TrimRight(envString("GROK2API_REGISTRATION_SERVICE_URL", ""), "/"),
 		RegistrationToken:               envString("GROK2API_REGISTRATION_TOKEN", ""),
 		StaticDir:                       envString("GROK2API_STATIC_DIR", defaultStaticDir),
+		AdminUI:                         strings.ToLower(strings.TrimSpace(envString("GROK2API_ADMIN_UI", "auto"))),
 		SSEKeepalive:                    keepalive,
 		RequestTimeout:                  timeout,
 		OutboundMaxTools:                outboundMaxTools,

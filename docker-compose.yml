@@ -84,6 +84,7 @@ services:
       TURNSTILE_IDLE_SEC: "${TURNSTILE_IDLE_SEC:-180}"
       # Go is the main process; Python only runs registration/SSO/captcha sidecars.
       GROK2API_RUNTIME: "${GROK2API_RUNTIME:-go}"
+      GROK2API_ADMIN_UI: "${GROK2API_ADMIN_UI:-auto}"
       GROK2API_GO_PUBLIC_READ: "${GROK2API_GO_PUBLIC_READ:-1}"
       GROK2API_GO_CHAT: "${GROK2API_GO_CHAT:-1}"
       GROK2API_GO_MESSAGES: "${GROK2API_GO_MESSAGES:-1}"

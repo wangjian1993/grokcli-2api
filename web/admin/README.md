@@ -18,9 +18,11 @@ pnpm dev
 pnpm build
 ```
 
-产物写入仓库 `static/admin/`（`base=/static/admin/`，路由 history base=`/admin/`）。
+产物写入仓库 `static/admin-spa/`（`base=/static/admin-spa/`），**不会**覆盖多页 `static/admin/*.html`。
 
-Docker 镜像构建时由 `admin-builder` 阶段自动 `pnpm build` 并覆盖 `/app/static/admin`。
+Docker 镜像构建时由 `admin-builder` 阶段自动 `pnpm build` 并安装到 `/app/static/admin-spa`。
+
+Go 服务端默认 `GROK2API_ADMIN_UI=auto`：存在 `static/admin-spa/index.html` 时 `/admin` 走 SPA，否则走多页。
 
 ## 路由
 

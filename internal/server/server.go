@@ -48,6 +48,7 @@ type Options struct {
 	Ready             func() bool
 	Reason            func() string
 	StaticDir         string
+	AdminUI           string // legacy | spa | auto
 	PublicReadEnabled bool
 	AdminReadEnabled  bool
 	AdminWriteEnabled bool
@@ -240,10 +241,10 @@ func NewMux(options Options) http.Handler {
 		serveFile(w, r, filepath.Join(staticDir, "favicon.ico"), false)
 	})
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
-		serveAdminPage(w, r, staticDir, "index")
+		serveAdminPage(w, r, options, staticDir, "index")
 	})
 	mux.HandleFunc("GET /admin/{page}", func(w http.ResponseWriter, r *http.Request) {
-		serveAdminPage(w, r, staticDir, r.PathValue("page"))
+		serveAdminPage(w, r, options, staticDir, r.PathValue("page"))
 	})
 	mux.HandleFunc("GET /static/{file...}", func(w http.ResponseWriter, r *http.Request) {
 		serveStatic(w, r, staticDir, r.PathValue("file"))
@@ -6025,8 +6026,6 @@ func serveAccountsRefresh(w http.ResponseWriter, r *http.Request, options Option
 	writeJSON(w, http.StatusOK, result)
 }
 
-
-
 func syncAutoReplenishSidecar(ctx context.Context, options Options, settings map[string]any) {
 	if settings == nil {
 		return
@@ -8582,7 +8581,7 @@ func clearAdminCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: admin.AdminCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 }
 
-func serveAdminPage(w http.ResponseWriter, r *http.Request, staticDir, page string) {
+func serveAdminPage(w http.ResponseWriter, r *http.Request, options Options, staticDir, page string) {
 	name := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(page, ".html")))
 	// Reject common broken client links (mobile nav used to emit href="undefined"
 	// when PAGE_HREF omitted usage/logs → browser hit /admin/undefined → 404).
@@ -8602,7 +8601,28 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request, staticDir, page stri
 		http.NotFound(w, r)
 		return
 	}
+	// Optional Vue SPA (static/admin-spa). Hash routes keep /admin shell only.
+	if useAdminSPA(options, staticDir) {
+		serveFile(w, r, filepath.Join(staticDir, "admin-spa", "index.html"), true)
+		return
+	}
 	serveFile(w, r, filepath.Join(staticDir, "admin", name+".html"), true)
+}
+
+func useAdminSPA(options Options, staticDir string) bool {
+	mode := strings.ToLower(strings.TrimSpace(options.AdminUI))
+	if mode == "" {
+		mode = "auto"
+	}
+	switch mode {
+	case "spa", "vue", "1", "true", "on":
+		return true
+	case "legacy", "multi", "0", "false", "off":
+		return false
+	default: // auto
+		_, err := os.Stat(filepath.Join(staticDir, "admin-spa", "index.html"))
+		return err == nil
+	}
 }
 
 func allowedAdminPage(name string) bool {
@@ -8631,26 +8651,59 @@ func serveStatic(w http.ResponseWriter, r *http.Request, staticDir, name string)
 // isHashedDistAsset reports whether cleaned path is under /dist/ and the
 // basename looks like name.<8+hex>.js|css (content-hash fingerprint).
 func isHashedDistAsset(cleaned string) bool {
-	// cleaned is like "/dist/core.f5e0a3148a.js"
-	if !strings.HasPrefix(cleaned, "/dist/") {
-		return false
+	// Content-hashed fingerprints:
+	//
+	//	/dist/core.f5e0a3148a.js          (build_admin_assets.py)
+	//	/admin-spa/assets/index-DOdx9xpO.js (Vite)
+	if strings.HasPrefix(cleaned, "/dist/") {
+		base := filepath.Base(cleaned)
+		dot := strings.LastIndex(base, ".")
+		if dot <= 0 {
+			return false
+		}
+		ext := strings.ToLower(base[dot+1:])
+		if ext != "js" && ext != "css" {
+			return false
+		}
+		name := base[:dot]
+		hashDot := strings.LastIndex(name, ".")
+		if hashDot <= 0 || hashDot == len(name)-1 {
+			return false
+		}
+		hash := name[hashDot+1:]
+		return isHexHash(hash)
 	}
-	base := filepath.Base(cleaned)
-	// e.g. core.f5e0a3148a.js, admin-antd.1031c5bb2f.css
-	dot := strings.LastIndex(base, ".")
-	if dot <= 0 {
-		return false
+	if strings.HasPrefix(cleaned, "/admin-spa/assets/") {
+		base := filepath.Base(cleaned)
+		dot := strings.LastIndex(base, ".")
+		if dot <= 0 {
+			return false
+		}
+		ext := strings.ToLower(base[dot+1:])
+		if ext != "js" && ext != "css" {
+			return false
+		}
+		name := base[:dot]
+		// Vite: chunk-ABCDEF12 or index-DOdx9xpO
+		dash := strings.LastIndex(name, "-")
+		if dash <= 0 || dash == len(name)-1 {
+			return false
+		}
+		hash := name[dash+1:]
+		if len(hash) < 6 {
+			return false
+		}
+		for _, c := range hash {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+				return false
+			}
+		}
+		return true
 	}
-	ext := strings.ToLower(base[dot+1:])
-	if ext != "js" && ext != "css" {
-		return false
-	}
-	name := base[:dot]
-	hashDot := strings.LastIndex(name, ".")
-	if hashDot <= 0 || hashDot == len(name)-1 {
-		return false
-	}
-	hash := name[hashDot+1:]
+	return false
+}
+
+func isHexHash(hash string) bool {
 	if len(hash) < 8 {
 		return false
 	}

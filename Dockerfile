@@ -9,6 +9,18 @@ COPY internal ./internal
 RUN go build -o /out/grok2api ./cmd/grok2api \
     && go build -o /out/grok2api-migrate ./cmd/grok2api-migrate
 
+# Optional Vue admin SPA (static/admin-spa). Multi-page static/admin remains default.
+FROM node:22-bookworm AS admin-builder
+WORKDIR /src/web/admin
+COPY web/admin/package.json web/admin/pnpm-lock.yaml web/admin/.npmrc ./
+RUN corepack enable \
+    && corepack prepare pnpm@9.15.0 --activate \
+    && pnpm install --frozen-lockfile
+COPY web/admin/ ./
+RUN pnpm build \
+    && test -f dist/index.html \
+    && test -d dist/assets
+
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -103,6 +115,13 @@ RUN python -m camoufox fetch \
     && python -m patchright install chromium || true
 
 COPY . /app
+# Overlay Vue SPA build when present (does not replace multi-page static/admin).
+COPY --from=admin-builder /src/web/admin/dist /app/static/admin-spa
+RUN printf 'spa\n' > /app/static/admin-spa/.admin-ui \
+    && test -f /app/static/admin-spa/index.html \
+    && test -d /app/static/admin-spa/assets \
+    && test -f /app/static/admin/index.html
+
 COPY --from=go-builder /out/grok2api /app/bin/grok2api
 COPY --from=go-builder /out/grok2api-migrate /app/bin/grok2api-migrate
 RUN chmod +x /app/entrypoint.sh /app/bin/grok2api /app/bin/grok2api-migrate \

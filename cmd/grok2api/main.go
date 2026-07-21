@@ -221,6 +221,7 @@ func main() {
 		Ready:             readiness.Ready,
 		Reason:            readiness.Reason,
 		StaticDir:         cfg.StaticDir,
+		AdminUI:           cfg.AdminUI,
 		PublicReadEnabled: cfg.GoPublicRead,
 		AdminReadEnabled:  cfg.GoAdminRead,
 		AdminWriteEnabled: cfg.GoAdminWrite,

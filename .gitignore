@@ -68,6 +68,7 @@ scripts/release_v*.sh
 scripts/_fetch_*.py
 /tmp/
 
-# Admin SPA (Vue)
+# Admin SPA (Vue) — build outputs only; source is web/admin/
 web/admin/node_modules/
 web/admin/dist/
+static/admin-spa/

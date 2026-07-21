@@ -25,16 +25,16 @@
 
 ---
 
-## 管理台前端（Vue / antdv-next）
+## 管理台前端（Vue / antdv-next，可选）
 
-源码：`web/admin`（Vue 3 + Vite + antdv-next）。构建产物：`static/admin/`。
+默认生产 UI 仍是多页 `static/admin/*.html` + `static/dist`。Vue SPA 源码在 `web/admin`（Vue 3 + Vite + antdv-next）。
 
 ```bash
 cd web/admin && pnpm install && pnpm dev   # 开发，API 代理到 :3000
-cd web/admin && pnpm build                # 输出到 static/admin/
+cd web/admin && pnpm build                # 输出到 static/admin-spa/（不覆盖多页管理台）
 ```
 
-Docker 多阶段 `admin-builder` 会在镜像构建时自动 `pnpm build` 并覆盖 `/app/static/admin`。前端使用 **Hash 路由**（`/admin#/login`、`/admin#/keys`…）；静态资源 base 为 `/static/admin/`。
+Docker 多阶段 `admin-builder` 会在镜像构建时 `pnpm build` 并写入 `/app/static/admin-spa`。Go 在 **`GROK2API_ADMIN_UI=auto`（默认）** 下若检测到 `static/admin-spa/index.html` 则对 `/admin` 提供 SPA；设为 `legacy` 强制多页，设为 `spa` 强制 SPA。Hash 路由：`/admin#/login`、`/admin#/keys`…；资源 base 为 `/static/admin-spa/`。
 
 ## 架构
 
