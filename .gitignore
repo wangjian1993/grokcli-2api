@@ -67,3 +67,7 @@ install_*_en.sh
 scripts/release_v*.sh
 scripts/_fetch_*.py
 /tmp/
+
+# Admin SPA (Vue)
+web/admin/node_modules/
+web/admin/dist/

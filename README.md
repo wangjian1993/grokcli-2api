@@ -25,7 +25,19 @@
 
 ---
 
+## 管理台前端（Vue / antdv-next）
+
+源码：`web/admin`（Vue 3 + Vite + antdv-next）。构建产物：`static/admin/`。
+
+```bash
+cd web/admin && pnpm install && pnpm dev   # 开发，API 代理到 :3000
+cd web/admin && pnpm build                # 输出到 static/admin/
+```
+
+Docker 多阶段 `admin-builder` 会在镜像构建时自动 `pnpm build` 并覆盖 `/app/static/admin`。前端使用 **Hash 路由**（`/admin#/login`、`/admin#/keys`…）；静态资源 base 为 `/static/admin/`。
+
 ## 架构
+
 
 ```
 客户端 (OpenAI / Anthropic SDK · new-api · Claude Code / sub2api)

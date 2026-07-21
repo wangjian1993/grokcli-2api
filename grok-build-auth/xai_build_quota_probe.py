@@ -25,7 +25,7 @@ import requests
 DEFAULT_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 DEFAULT_HEADERS = {
     "X-XAI-Token-Auth": "xai-grok-cli",
-    "x-grok-client-version": "0.2.93",
+    "x-grok-client-version": "0.2.106",
     "x-grok-client-identifier": "grok-shell",
 }
 
@@ -144,7 +144,7 @@ def probe(path: Path, timeout: float, use_auth_base_url: bool = False) -> dict[s
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "grok-cli/0.2.93",
+        "User-Agent": "grok-cli/0.2.106",
         **DEFAULT_HEADERS,
     }
     extra = auth.get("headers")
