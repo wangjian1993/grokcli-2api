@@ -19,18 +19,18 @@ async function initApplication() {
     overrides: overridesPreferences,
   });
 
-  // 强制使用项目 logo.png（避免旧 localStorage 偏好覆盖）
-  const { updatePreferences, preferences } = await import('@/core/preferences');
-  const logoSrc = overridesPreferences.logo?.source;
-  if (logoSrc && preferences.logo?.source !== logoSrc) {
-    updatePreferences({
-      logo: {
-        enable: true,
-        source: logoSrc,
-        fit: overridesPreferences.logo?.fit || 'contain',
-      },
-    });
-  }
+  // 强制品牌 logo（不透明）+ 默认头像（透明），避免旧 localStorage 串用
+  const { updatePreferences } = await import('@/core/preferences');
+  updatePreferences({
+    logo: {
+      enable: true,
+      source: overridesPreferences.logo?.source || '',
+      fit: overridesPreferences.logo?.fit || 'contain',
+    },
+    app: {
+      defaultAvatar: overridesPreferences.app?.defaultAvatar || '',
+    },
+  });
 
   // 启动应用并挂载
   // vue应用主要逻辑及视图

@@ -1,15 +1,9 @@
 {
   "name": "grokcli-2api-admin",
   "version": "2.1.0",
-  "description": "grokcli-2api admin SPA based on bell-plus (antdv-next)",
+  "description": "grokcli-2api admin SPA (Vue3 + antdv-next)",
   "private": true,
-  "homepage": "https://gitee.com/dapppp/bell-plus",
-  "repository": "dapppp/bell-plus",
   "license": "MIT",
-  "author": {
-    "name": "dap",
-    "url": "https://gitee.com/dapppp"
-  },
   "type": "module",
   "scripts": {
     "bootstrap": "pnpm install",

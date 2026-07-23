@@ -189,7 +189,13 @@ if (enableShortcutKey.value) {
   >
     <div class="hover:bg-accent mr-2 ml-1 cursor-pointer rounded-full p-1.5">
       <div class="flex-center hover:text-accent-foreground">
-        <VbenAvatar :alt="text" :src="avatar" class="size-8" dot />
+        <VbenAvatar
+          :alt="text"
+          :src="avatar"
+          class="g2a-user-avatar size-8"
+          fit="contain"
+          dot
+        />
       </div>
     </div>
     <template #popupRender>
@@ -201,6 +207,8 @@ if (enableShortcutKey.value) {
             :alt="text"
             :src="avatar"
             :size="48"
+            class="g2a-user-avatar"
+            fit="contain"
             dot
             dot-class="bottom-0 right-1 border-2 size-4 bg-green-500"
           />

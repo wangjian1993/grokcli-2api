@@ -39,9 +39,7 @@ function defineApplicationConfig(userConfigPromise?: DefineApplicationOptions) {
       license: true,
       mode,
       print: !isBuild,
-      printInfoMap: {
-        'Gitee link': 'https://gitee.com/dapppp/bell-plus',
-      },
+      printInfoMap: {},
       vxeTableLazyImport: true,
       ...envConfig,
       ...application,

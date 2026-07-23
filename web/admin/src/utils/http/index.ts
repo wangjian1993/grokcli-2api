@@ -102,7 +102,7 @@ const alovaInstance = createAlova({
     /**
      * 添加全局clientId
      * 关于header的clientId被错误绑定到实体类
-     * https://gitee.com/dapppp/ruoyi-plus-vben5/issues/IC0BDS
+     * 401 统一处理：避免重复弹窗 / 重复跳转登录
      */
     config.headers.ClientID = clientId;
     /**

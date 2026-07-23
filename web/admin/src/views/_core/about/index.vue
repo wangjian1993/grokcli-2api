@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import type { DescriptionsProps } from 'antdv-next';
 
-import { computed, h } from 'vue';
+import { computed } from 'vue';
 
 import { Page } from '@/components';
 import { Card, Descriptions } from 'antdv-next';
@@ -26,21 +26,11 @@ declare global {
 
 type AboutDescriptionItem = DescriptionsProps['items'];
 
-const description =
-  '基于vben5.7版本(被一万行提交改坏前的最后一个提交)重构 更新为单仓项目 组件库为antdv-next';
-const name = 'Vben Admin';
+const description = 'grokcli-2api 管理台（Vue3 + antdv-next）';
+const name = 'grokcli-2api Admin';
 const title = '关于项目';
 
-const renderLink = (href: string, text: string) =>
-  h(
-    'a',
-    { href, target: '_blank', class: 'vben-link' },
-    { default: () => text },
-  );
-
 const {
-  authorName,
-  authorUrl,
   buildTime,
   dependencies = {},
   devDependencies = {},
@@ -70,18 +60,6 @@ const baseInfoItems = computed<AboutDescriptionItem>(() => [
     content: buildTime,
     label: '最后构建时间',
   },
-  {
-    content: renderLink('https://gitee.com/dapppp/bell-plus', '点击查看'),
-    label: '文档地址',
-  },
-  {
-    content: renderLink('https://gitee.com/dapppp/bell-plus', '点击查看'),
-    label: 'Gitee',
-  },
-  {
-    content: h('div', [renderLink(authorUrl, `${authorName}  `)]),
-    label: '作者',
-  },
 ]);
 
 const dependenciesItems = computed<AboutDescriptionItem>(() =>
@@ -103,9 +81,7 @@ const devDependenciesItems = computed<AboutDescriptionItem>(() =>
   <Page :title="title" content-class="flex flex-col gap-4">
     <template #description>
       <p class="text-foreground mt-3 text-sm/6">
-        <a href="https://www.baidu.com" class="vben-link" target="_blank">
-          {{ name }}
-        </a>
+        <span class="font-medium">{{ name }}</span>
         {{ description }}
       </p>
     </template>

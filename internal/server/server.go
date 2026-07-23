@@ -1345,13 +1345,14 @@ func recordChatUsageWithHint(r *http.Request, options Options, apiKey *auth.APIK
 	if ok {
 		flags.apply(detail)
 	}
+	detail = attachClientRequestID(detail, r)
 	// Fire-and-forget with longer timeout - usage recording should not block response
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if options.Store != nil {
 			if _, _, err := options.Store.RecordUsage(ctx, postgres.UsageRecord{
-				RequestID:           requestID(r),
+				RequestID:           usageRequestID(),
 				Implementation:      "go",
 				APIKeyID:            apiKeyID,
 				AccountID:           accountID,
@@ -1519,17 +1520,54 @@ func parseTokenPair(errText string) (actual, limit int64, ok bool) {
 	return pool.ParseTokenPair(errText)
 }
 
-func requestID(r *http.Request) string {
-	for _, name := range []string{"X-Request-ID", "X-Correlation-ID", "X-Client-Request-ID"} {
-		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
-			return value
-		}
-	}
+// usageRequestID returns a unique per-attempt id for usage_events / idempotency.
+//
+// IMPORTANT: never use client X-Request-ID (etc.) as the durable key. Clients
+// such as Codex Desktop reuse the same header across many chat/completions
+// turns; treating it as ON CONFLICT unique caused ~97% of successful requests
+// (e.g. 113.89.100.98) to skip usage_events entirely while nginx still saw 200s.
+// Client correlation ids are stored in detail via clientRequestID instead.
+func usageRequestID() string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		return "go-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 	return "go-" + hex.EncodeToString(buf)
+}
+
+// clientRequestID returns the first non-empty client correlation header for
+// tracing only (not for usage idempotency).
+func clientRequestID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, name := range []string{"X-Request-ID", "X-Correlation-ID", "X-Client-Request-ID"} {
+		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
+			if len(value) > 200 {
+				return value[:200]
+			}
+			return value
+		}
+	}
+	return ""
+}
+
+// attachClientRequestID copies the client correlation id into usage detail when present.
+func attachClientRequestID(detail map[string]any, r *http.Request) map[string]any {
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	if id := clientRequestID(r); id != "" {
+		detail["client_request_id"] = id
+	}
+	return detail
+}
+
+// requestID is kept as an alias for call sites that historically meant "usage id".
+// Always generates a server-side unique id (see usageRequestID).
+func requestID(r *http.Request) string {
+	_ = r
+	return usageRequestID()
 }
 
 func clientIP(r *http.Request) string {
@@ -2723,13 +2761,14 @@ func recordResponsesUsage(r *http.Request, options Options, apiKey *auth.APIKeyR
 	if ok {
 		flags.apply(detail)
 	}
+	detail = attachClientRequestID(detail, r)
 	// Fire-and-forget with longer timeout - usage recording should not block response
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if options.Store != nil {
 			if _, _, err := options.Store.RecordUsage(ctx, postgres.UsageRecord{
-				RequestID:           requestID(r),
+				RequestID:           usageRequestID(),
 				Implementation:      "go",
 				APIKeyID:            apiKeyID,
 				AccountID:           accountID,
@@ -3808,7 +3847,7 @@ func recordAnthropicUsage(r *http.Request, options Options, apiKey *auth.APIKeyR
 		defer cancel()
 		if options.Store != nil {
 			if _, _, err := options.Store.RecordUsage(ctx, postgres.UsageRecord{
-				RequestID:           requestID(r),
+				RequestID:           usageRequestID(),
 				Implementation:      "go",
 				APIKeyID:            apiKeyID,
 				AccountID:           accountID,
@@ -3854,7 +3893,7 @@ func recordAnthropicUsage(r *http.Request, options Options, apiKey *auth.APIKeyR
 						}
 						flags.apply(d)
 					}
-					return d
+					return attachClientRequestID(d, r)
 				}(),
 			}); err != nil {
 				slog.Warn("record usage failed", "error", err, "account_id", accountID, "model", model, "ok", ok)

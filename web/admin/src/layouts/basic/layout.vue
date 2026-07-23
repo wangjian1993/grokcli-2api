@@ -13,6 +13,7 @@ import {
   usePreferences,
 } from '@/core/preferences';
 import { VbenBackTop, VbenLogo } from '@/core/ui/adapter';
+import { projectLogoUrl } from '@/utils/project-logo';
 import { VbenAdminLayout } from '@/core/ui/layout';
 import { useRefresh } from '@/hooks';
 import { $t, i18n } from '@/locales';
@@ -67,13 +68,27 @@ const headerTheme = computed(() => {
 });
 
 const logoClass = computed(() => {
-  const classes: string[] = [];
+  const classes: string[] = ['g2a-brand-logo'];
 
   if (isSideMixedNav.value) {
     classes.push('flex-center');
   }
 
   return classes.join(' ');
+});
+
+/** 左上角品牌图：偏好覆盖优先，否则固定项目 logo（避免缓存把 source 清掉） */
+const brandLogoSrc = computed(() => {
+  const src = preferences.logo?.source || '';
+  if (
+    src &&
+    !src.includes('antdv-next-logo') &&
+    !src.includes('logo-v1.webp') &&
+    !src.includes('plus-vben')
+  ) {
+    return src;
+  }
+  return projectLogoUrl();
 });
 
 const isMenuRounded = false;
@@ -262,12 +277,12 @@ const headerSlots = computed(() => {
     <!-- logo -->
     <template #logo>
       <VbenLogo
-        v-if="preferences.logo.enable"
-        :fit="preferences.logo.fit"
+        v-if="preferences.logo.enable !== false"
+        :fit="preferences.logo.fit || 'contain'"
         :class="logoClass"
         :collapsed="logoCollapsed"
-        :src="preferences.logo.source"
-        :src-dark="preferences.logo.sourceDark"
+        :src="brandLogoSrc"
+        :src-dark="preferences.logo.sourceDark || brandLogoSrc"
         :text="preferences.app.name"
         :theme="logoTheme"
         @click="clickLogo"
@@ -352,8 +367,10 @@ const headerSlots = computed(() => {
     </template>
     <template #side-extra-title>
       <VbenLogo
-        v-if="preferences.logo.enable"
-        :fit="preferences.logo.fit"
+        v-if="preferences.logo.enable !== false"
+        :fit="preferences.logo.fit || 'contain'"
+        class="g2a-brand-logo"
+        :src="brandLogoSrc"
         :text="preferences.app.name"
         :theme="sidebarThemeSub"
       >

@@ -1,9 +1,16 @@
 import { defineOverridesPreferences } from '@/core/preferences';
 
+import { projectAvatarUrl, projectLogoUrl } from '@/utils/project-logo';
+
 /**
  * grokcli-2api 管理台偏好覆盖
  * 更改配置后请清空 localStorage
  */
+// 左上角：不透明品牌图
+const brandLogo = projectLogoUrl();
+// 右上角：透明底头像
+const brandAvatar = projectAvatarUrl();
+
 export const overridesPreferences = defineOverridesPreferences({
   app: {
     name: import.meta.env.VITE_APP_TITLE,
@@ -12,6 +19,8 @@ export const overridesPreferences = defineOverridesPreferences({
     enablePreferences: true,
     locale: 'zh-CN',
     layout: 'sidebar-nav',
+    // 右上角个人中心：透明底 avatar.png
+    defaultAvatar: brandAvatar,
   },
   tabbar: {
     persist: false,
@@ -24,8 +33,8 @@ export const overridesPreferences = defineOverridesPreferences({
   },
   logo: {
     enable: true,
-    // 使用 public/logo.png；拼上 VITE_BASE 以便 /admin 同域静态路径正确
-    source: `${import.meta.env.VITE_BASE || '/'}logo.png`.replace(/\/+/g, '/').replace(':/', '://'),
+    // 左上角品牌：不透明 logo.png
+    source: brandLogo,
     fit: 'contain',
   },
   widget: {

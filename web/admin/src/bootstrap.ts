@@ -47,7 +47,6 @@ async function bootstrap(namespace: string) {
     console.warn('[admin] token sync skipped', e);
   }
 
-
   // 安装权限指令
   registerAccessDirective(app);
 
@@ -56,6 +55,34 @@ async function bootstrap(namespace: string) {
 
   // 配置路由及路由守卫
   app.use(router);
+
+  // g2a admin API 走 fetch（X-Admin-Token），401 时需主动清会话并跳登录页。
+  // 原先只定义了 onUnauthorized，从未注册监听，接口 401 只会抛错、页面留在空数据态。
+  try {
+    const { onUnauthorized } = await import('@/utils/g2a/request');
+    const { useAuthStore } = await import('@/stores');
+    let redirecting = false;
+    onUnauthorized((err) => {
+      if (redirecting || err?.soft) return;
+      redirecting = true;
+      const authStore = useAuthStore();
+      void authStore
+        .logout(true)
+        .catch(() => {
+          /* logout 自身失败也已清 token / replace 登录路由 */
+        })
+        .finally(() => {
+          redirecting = false;
+        });
+      try {
+        window.message?.warning?.(err?.message || '登录已失效，请重新登录');
+      } catch {
+        /* ignore */
+      }
+    });
+  } catch (e) {
+    console.warn('[admin] unauthorized handler skipped', e);
+  }
 
   // 动态更新标题
   watchEffect(() => {

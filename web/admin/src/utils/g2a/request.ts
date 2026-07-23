@@ -87,6 +87,35 @@ function headers(json = true): Record<string, string> {
   return h
 }
 
+/** Paths that may legitimately return 401 without forcing a login redirect. */
+function shouldIgnoreUnauthorized(path: string): boolean {
+  const pathStr = String(path || '')
+  const bare = pathStr.split('?')[0] || ''
+  return (
+    bare === '/login' ||
+    bare === '/setup' ||
+    bare === '/logout' ||
+    bare === '/session' ||
+    bare.startsWith('/status') ||
+    pathStr.includes('/register-email/sessions/')
+  )
+}
+
+function notifyUnauthorized(err: ApiError) {
+  if (err.status !== 401) return
+  if (shouldIgnoreUnauthorized(String(err.path || ''))) return
+  // Admin auth is session-token based: any real 401 means the token is gone
+  // (restart, expiry, wrong instance). Always redirect to login — do not soft-
+  // swallow inside the 5min grace window, or empty pages stay open with no data.
+  unauthorizedListeners.forEach((fn) => {
+    try {
+      fn(err)
+    } catch {
+      /* ignore */
+    }
+  })
+}
+
 export async function api<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   const isForm = typeof FormData !== 'undefined' && opts.body instanceof FormData
   const method = (opts.method || 'GET').toUpperCase()
@@ -138,22 +167,7 @@ export async function api<T = any>(path: string, opts: RequestInit = {}): Promis
       data,
       path,
     })
-    const pathStr = String(path || '')
-    const ignore401 =
-      pathStr.startsWith('/status') || pathStr.includes('/register-email/sessions/')
-    if (res.status === 401 && !ignore401) {
-      if (!inAuthGrace()) {
-        unauthorizedListeners.forEach((fn) => {
-          try {
-            fn(err)
-          } catch {
-            /* ignore */
-          }
-        })
-      } else {
-        err.soft = true
-      }
-    }
+    notifyUnauthorized(err)
     throw err
   }
 
@@ -177,7 +191,9 @@ export async function download(path: string, opts: RequestInit = {}) {
     } catch {
       /* ignore */
     }
-    throw new ApiError(msg, { status: res.status, path })
+    const err = new ApiError(msg, { status: res.status, path })
+    notifyUnauthorized(err)
+    throw err
   }
   const blob = await res.blob()
   let filename = 'download.bin'

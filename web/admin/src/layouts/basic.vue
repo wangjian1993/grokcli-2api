@@ -6,13 +6,12 @@ import { useRouter } from 'vue-router';
 
 import { preferences, usePreferences } from '@/core/preferences';
 import { useWatermark } from '@/hooks';
-import { GiteeIcon } from '@/icons';
 import { $t } from '@/locales';
 import { resetRoutes } from '@/router';
 import { useAuthStore, useUserStore } from '@/stores';
 import { getStatus } from '@/api/g2a';
-import { openWindow } from '@/utils';
 import { useVersionUpdate } from '@/utils/check-update';
+import { projectAvatarUrl } from '@/utils/project-logo';
 import { UserOutlined } from '@antdv-next/icons';
 import { Badge, Tag, Tooltip, Watermark } from 'antdv-next';
 
@@ -36,7 +35,7 @@ const watermarkStyle: CSSProperties = {
 };
 
 const menus = computed(() => {
-  const defaultMenus = [
+  return [
     {
       handler: () => {
         router.push('/profile');
@@ -44,22 +43,27 @@ const menus = computed(() => {
       icon: UserOutlined,
       text: $t('ui.widgets.profile'),
     },
-    {
-      handler: () => {
-        openWindow('https://gitee.com/dapppp/bell-plus', {
-          target: '_blank',
-        });
-      },
-      icon: GiteeIcon,
-      iconClass: 'text-red-800',
-      text: 'Gitee项目地址',
-    },
   ];
-  return defaultMenus;
 });
 
+/** 默认头像：透明底 avatar.png（与左上角不透明 logo 区分） */
+const defaultUserAvatar = projectAvatarUrl();
+
 const avatar = computed(() => {
-  return userStore.userInfo?.avatarUrl || preferences.app.defaultAvatar;
+  const info = userStore.userInfo;
+  const url = info?.avatarUrl || info?.avatar;
+  // 无用户自定义头像时用透明头像；并过滤模板默认图 / 品牌 logo 误用
+  if (
+    url &&
+    !String(url).includes('antdv-next-logo') &&
+    !String(url).includes('logo-v1.webp') &&
+    !String(url).includes('plus-vben') &&
+    // 若缓存里误存了品牌 logo.png，改回透明头像
+    !(String(url).includes('logo.png') && !String(url).includes('avatar.png'))
+  ) {
+    return url;
+  }
+  return preferences.app.defaultAvatar || defaultUserAvatar;
 });
 
 async function handleLogout() {
@@ -127,9 +131,10 @@ onMounted(async () => {
     const raw = String(st?.version || '').replace(/^v/i, '').trim();
     if (!raw) return;
     const version = `v${raw}`;
+    const brand = preferences.app.defaultAvatar || defaultUserAvatar;
     const prev = (userStore.userInfo || {
-      avatar: '',
-      avatarUrl: '',
+      avatar: brand,
+      avatarUrl: brand,
       permissions: ['*'],
       realName: '管理员',
       roles: ['admin'],
@@ -137,8 +142,18 @@ onMounted(async () => {
       username: 'admin',
       email: '',
     }) as any;
+    const prevUrl = String(prev.avatarUrl || prev.avatar || '');
+    const avatarUrl =
+      prevUrl &&
+      !prevUrl.includes('antdv-next-logo') &&
+      !prevUrl.includes('logo-v1.webp') &&
+      !(prevUrl.includes('logo.png') && !prevUrl.includes('avatar.png'))
+        ? prevUrl
+        : brand;
     userStore.setUserInfo({
       ...prev,
+      avatar: avatarUrl,
+      avatarUrl,
       desc: version,
       version,
       runtime: st?.runtime || st?.implementation || prev.runtime || 'go',

@@ -1,6 +1,6 @@
 # grokcli-2api Admin
 
-基于 [bell-plus](https://gitee.com/dapppp/bell-plus)（vben5 + antdv-next）重构的管理台 SPA。
+基于 Vue3 + antdv-next 的 grokcli-2api 管理台 SPA。
 
 ## 技术栈
 

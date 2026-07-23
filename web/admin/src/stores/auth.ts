@@ -15,6 +15,7 @@ import {
   getToken as getG2aToken,
   api as g2aApi,
 } from '@/utils/g2a/request';
+import { projectAvatarUrl } from '@/utils/project-logo';
 
 export const useAuthStore = defineStore('auth', () => {
   const accessStore = useAccessStore();
@@ -61,6 +62,11 @@ export const useAuthStore = defineStore('auth', () => {
       }
 
       window.message?.success?.(params.setup ? '管理员密码已创建' : '登录成功');
+    } catch (e) {
+      // 登录失败时清掉半截 token，避免守卫以为已登录
+      clearG2aToken();
+      accessStore.setAccessToken(null);
+      throw e;
     } finally {
       loginLoading.value = false;
     }
@@ -72,11 +78,17 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       await g2aApi('/logout', { method: 'POST', body: '{}' });
     } catch {
-      /* ignore */
-    } finally {
-      clearG2aToken();
-      resetAllStores();
-      accessStore.setLoginExpired(false);
+      /* ignore — token 可能已失效，仍继续清本地会话 */
+    }
+    clearG2aToken();
+    accessStore.setAccessToken(null);
+    accessStore.setLoginExpired(false);
+    resetAllStores();
+    // 无 token 时守卫会拦业务页；主动 replace 保证接口 401 后立刻到登录页
+    const onLogin =
+      router.currentRoute.value.path === LOGIN_PATH ||
+      router.currentRoute.value.path.startsWith('/auth/');
+    if (!onLogin) {
       await router.replace({
         path: LOGIN_PATH,
         query: redirect
@@ -114,9 +126,11 @@ export const useAuthStore = defineStore('auth', () => {
     const email = status?.credentials_email || status?.admin_email || '';
     const rawVersion = String(status?.version || '').replace(/^v/i, '').trim();
     const version = rawVersion ? `v${rawVersion}` : '';
+    const avatar =
+      preferences.app.defaultAvatar || projectAvatarUrl();
     const userInfo: UserInfo = {
-      avatar: '',
-      avatarUrl: '',
+      avatar,
+      avatarUrl: avatar,
       permissions: ['*'],
       realName: email || '管理员',
       roles: ['admin'],
